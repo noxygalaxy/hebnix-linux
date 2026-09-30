@@ -59,9 +59,15 @@ sudo setcap cap_net_admin,cap_net_raw+eip ~/.local/bin/hebnix
 Everything else in the app works fine without it — this only gates LAN
 multiplayer.
 
+Using a VPN or proxy (Clash/Mihomo, Mullvad and so on), a firewall, or
+stuck? See [Workshop multiplayer help](docs/workshop-multiplayer-help.md).
+
 ### Importing maps / Steam Workshop downloads
 
-The Import Map tab adds a `.upk`/`.udk` you already have. Downloading
+The Import Map tab adds a `.upk`/`.udk` you already have, or a `.zip` with
+the map inside (unrelated files in the zip are skipped). It also lists the
+[RL Workshop Archive](https://xplodingeggo.github.io/RLWorkshopCollection/)
+for direct downloads; anyone can request a Workshop map there. Downloading
 straight from the Steam Workshop by item id also needs a .NET 9 (or newer)
 runtime (`dotnet-runtime`) and DepotDownloaderMod's files in
 `~/.config/hebnix/depotdownloader/`.
