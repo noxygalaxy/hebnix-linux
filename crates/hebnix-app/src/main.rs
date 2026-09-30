@@ -251,9 +251,11 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
 
-    eframe::run_native(
+    let result = eframe::run_native(
         "Hebnix",
         options,
         Box::new(|cc| Ok(Box::new(HebnixApp::new(cc)))),
-    )
+    );
+    watchdog::finish_live_handoff();
+    result
 }

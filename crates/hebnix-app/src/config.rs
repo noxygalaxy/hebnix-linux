@@ -67,6 +67,8 @@ pub struct SettingsCfg {
     pub suppress_statsapi_rate_warning: bool,
     /// Publish Hebnix/Rocket League activity to the local Discord client.
     pub discord_rich_presence: bool,
+    /// Show presence only while Rocket League is running.
+    pub discord_rocket_league_only: bool,
     /// Include the selected live match fields in Rich Presence.
     #[serde(alias = "discord_current_gamemode")]
     pub discord_game_state: bool,
@@ -89,6 +91,7 @@ impl Default for SettingsCfg {
             suppress_fullscreen_warning: false,
             suppress_statsapi_rate_warning: false,
             discord_rich_presence: true,
+            discord_rocket_league_only: false,
             discord_game_state: true,
             discord_show_score: true,
             discord_show_map: true,

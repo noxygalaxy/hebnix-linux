@@ -166,12 +166,14 @@ impl TrackerClient {
             urlencode(platform),
             urlencode(platform_user_id)
         );
-        let mut request = ureq::get(&url)
+        let agent = ureq::AgentBuilder::new().redirects(0).build();
+        let mut request = agent
+            .get(&url)
             .set("Accept", "application/json")
-            .set("User-Agent", "Hebnix-Linux/2.1.9")
+            .set("User-Agent", "Hebnix-Linux/2.1.11")
             .timeout(self.timeout);
-        // req.hebnix.com is moving to a per-app TOTP token to keep bots out.
-        if let Some(token) = crate::tracker::totp::current_token() {
+        // builds without a baked-in key still send the request, just untokened
+        if let Some(token) = crate::req_auth::app_token_if_configured()? {
             request = request.set("X-App-Token", &token);
         }
         let response = match request.call() {

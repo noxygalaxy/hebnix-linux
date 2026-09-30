@@ -68,7 +68,7 @@ impl PartialEq for Activity {
 
 enum Command {
     Configure(bool),
-    Activity(Activity),
+    Activity(Option<Activity>),
     Shutdown,
 }
 
@@ -97,6 +97,10 @@ impl DiscordPresence {
     }
 
     pub fn set_idle(&self, settings: &crate::config::SettingsCfg, rocket_league_open: bool) {
+        if settings.discord_rocket_league_only && !rocket_league_open {
+            let _ = self.tx.send(Command::Activity(None));
+            return;
+        }
         let (details, state) = idle_activity(settings, rocket_league_open);
         let name = if rocket_league_open {
             ROCKET_LEAGUE_DISPLAY_NAME
@@ -118,7 +122,7 @@ impl DiscordPresence {
             state: truncate_utf8(state.into().trim(), 128),
             started_at: unix_time(),
         };
-        let _ = self.tx.send(Command::Activity(activity));
+        let _ = self.tx.send(Command::Activity(Some(activity)));
     }
 
     pub fn stop(&mut self) {
@@ -189,8 +193,8 @@ fn run_worker(rx: Receiver<Command>, mut enabled: bool) {
                 }
             }
             Ok(Command::Activity(activity)) => {
-                if desired.as_ref() != Some(&activity) {
-                    desired = Some(activity);
+                if desired != activity {
+                    desired = activity;
                 }
             }
             Ok(Command::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => {

@@ -9,8 +9,46 @@
 //! detached process. Poll `kill(pid, None)` (liveness probe, sends no
 //! signal) instead, the standard /proc-less way to check if a pid is alive.
 
+use std::sync::{Arc, OnceLock};
+
 use nix::sys::signal::kill;
 use nix::unistd::Pid;
+
+use crate::spoofer::SpooferManager;
+
+// Keep the live listeners in this process after the UI closes. Recreating
+// them in the cleanup child would drop Rocket League's active WebSocket.
+static LIVE_SPOOFER: OnceLock<Arc<SpooferManager>> = OnceLock::new();
+
+pub fn handoff_live_spoofer(spoofer: Arc<SpooferManager>) -> bool {
+    if !hebnix_sdk::process::is_rocket_league_running()
+        || !(spoofer.http_running() || spoofer.socket_running() || spoofer.rlapi_running())
+    {
+        return false;
+    }
+    LIVE_SPOOFER.set(spoofer).is_ok() || LIVE_SPOOFER.get().is_some()
+}
+
+pub fn has_live_handoff() -> bool {
+    LIVE_SPOOFER.get().is_some()
+}
+
+pub fn finish_live_handoff() {
+    let Some(spoofer) = LIVE_SPOOFER.get() else { return };
+    tracing::info!("Hebnix UI closed; proxy watchdog remains active until Rocket League exits");
+    while hebnix_sdk::process::is_rocket_league_running() {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+    spoofer.shutdown();
+    for _ in 0..5 {
+        if crate::winutil::clear_rocket_league_web_cache().is_ok() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+    let _ = crate::winutil::clear_rocket_league_multihome();
+    tracing::info!("Rocket League closed; proxy watchdog cleaned up");
+}
 
 pub const CLEANUP_WATCHDOG_ARG: &str = "--cleanup-watchdog";
 
@@ -31,10 +69,14 @@ pub fn spawn() -> bool {
         let _ = std::fs::create_dir_all(parent);
     }
     let _ = std::fs::write(watchdog_owner_path(), owner.to_string());
-    std::process::Command::new(exe)
+    let spawned = std::process::Command::new(exe)
         .args([CLEANUP_WATCHDOG_ARG, &owner.to_string()])
         .spawn()
-        .is_ok()
+        .is_ok();
+    if !spawned {
+        let _ = std::fs::remove_file(watchdog_owner_path());
+    }
+    spawned
 }
 
 pub fn parent_pid() -> Option<u32> {
@@ -50,6 +92,9 @@ pub fn parent_pid() -> Option<u32> {
 pub fn run(parent_pid: u32) {
     while pid_alive(parent_pid) {
         std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    if replacement_is_running(parent_pid) {
+        return;
     }
     if crate::spoofer::hosts::has_redirects() {
         let base_dir = crate::config::base_dir();
@@ -73,7 +118,14 @@ pub fn run(parent_pid: u32) {
     if replacement_is_running(parent_pid) {
         return;
     }
-    let _ = crate::winutil::clear_rocket_league_web_cache();
+    // Game shutdown can briefly keep WebCache files locked. Retry cleanup
+    // after the process has gone.
+    for _ in 0..5 {
+        if crate::winutil::clear_rocket_league_web_cache().is_ok() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
     for _ in 0..3 {
         let _ = crate::winutil::clear_rocket_league_multihome();
         std::thread::sleep(std::time::Duration::from_secs(1));

@@ -25,11 +25,11 @@ use crate::ui::console::ConsoleState;
 use crate::ui::workshop::{ImageState, WorkshopState};
 use crate::winutil;
 
-pub const APP_VERSION: &str = "2.1.9";
+pub const APP_VERSION: &str = "2.1.11";
 /// the actual hebnix-linux release version (shown in the About tab), as
 /// opposed to APP_VERSION above which tracks Windows Hebnix's engine/plugin
 /// compat version and is unrelated to this port's own release numbering.
-pub const LINUX_PORT_VERSION: &str = "0.2.0";
+pub const LINUX_PORT_VERSION: &str = "0.3.0-dev";
 
 pub const DEFAULT_WIDTH: f32 = 1250.0;
 pub const DEFAULT_HEIGHT: f32 = 700.0;
@@ -353,6 +353,7 @@ enum Tab {
     Patcher,
     Settings,
     Plugins,
+    RlApi,
     About,
 }
 
@@ -478,6 +479,7 @@ pub struct HebnixApp {
     patcher_subtab: PatcherSubTab,
     console: ConsoleState,
     workshop: WorkshopState,
+    rlapi_panel: crate::ui::rlapi::RlApiPanel,
 
     hidden: bool,
     topmost: bool,
@@ -889,6 +891,7 @@ impl HebnixApp {
             patcher_subtab: PatcherSubTab::Ball,
             console: ConsoleState::default(),
             workshop,
+            rlapi_panel: crate::ui::rlapi::RlApiPanel::default(),
             hidden,
             topmost: false,
             currently_connected: false,
@@ -1050,6 +1053,49 @@ impl HebnixApp {
         self.spoofer_username_history.truncate(3);
     }
 
+    fn enable_rlapi(&mut self) {
+        if self.rlapi_panel.starting { return; }
+        if !crate::multiplayer_lan::has_net_bind_service_capability() && !spoofer::is_admin() {
+            self.rlapi_panel.complete(Err("Grant Hebnix permission to bind port 443 (Spoofer tab, Grant Permission), then enable RLAPI capture.".into()));
+            return;
+        }
+        self.rlapi_panel.starting = true;
+        let manager = Arc::clone(&self.spoofer_mgr);
+        let base_dir = self.base_dir.clone();
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let result = (|| {
+                // Reuse the user's existing setup. Never install a CA or
+                // request elevated privileges implicitly from this tab.
+                if !spoofer::ca::is_current_installed(&base_dir) {
+                    return Err("Install the existing Hebnix certificate in Spoofer settings, then enable RLAPI.".into());
+                }
+                if !hebnix_sdk::process::is_rocket_league_running() {
+                    crate::winutil::clear_rocket_league_web_cache().map_err(|e|format!("Could not refresh Rocket League's cached configuration: {e}"))?;
+                }
+                manager.enable_rlapi()
+            })();
+            let _ = tx.send(AppMsg::RlApiCaptureReady(result));
+        });
+    }
+
+    fn render_rlapi_tab(&mut self, ui: &mut egui::Ui) {
+        use crate::ui::rlapi::Action;
+        let session = hebnix_sdk::rlapi::session::shared_game_session();
+        let status = if self.rlapi_panel.starting { "Enabling capture…".into() } else { session.status() };
+        match self.rlapi_panel.show(ui, session.enabled(), session.connected(), &status) {
+            Some(Action::Enable) => self.enable_rlapi(),
+            Some(Action::Disable) => self.spoofer_mgr.disable_rlapi(),
+            Some(Action::Send { service, body }) => {
+                let tx = self.tx.clone();
+                std::thread::spawn(move || {
+                    let result = session.request(&service, body);
+                    let _ = tx.send(AppMsg::RlApiResponse(result));
+                });
+            }
+            None => {}
+        }
+    }
     fn render_presets_tab(&mut self, ui: &mut egui::Ui, backups_dir: &std::path::Path) {
         ui.heading("Presets");
         ui.label("Save and restore named collections of your current item changes.");
@@ -1235,6 +1281,9 @@ impl HebnixApp {
             if self.spoofer_mgr.http_running() {
                 self.spoofer_mgr.stop_http();
             }
+            if let Err(error) = self.spoofer_mgr.reconcile_hosts() {
+                self.console.write(format!("[Spoofer] Hosts cleanup failed: {error}"));
+            }
             return;
         }
 
@@ -1277,6 +1326,9 @@ impl HebnixApp {
             }
         }
 
+        if let Err(error) = self.spoofer_mgr.reconcile_hosts() {
+            self.console.write(format!("[Spoofer] Hosts reconciliation failed: {error}"));
+        }
         self.save_friends_internal();
         self.save_ranks_internal();
     }
@@ -1345,7 +1397,7 @@ impl HebnixApp {
         self.plugin_mgr.dispatch_gui_visibility(!hidden);
     }
 
-    fn force_quit(&mut self, _ctx: &egui::Context) {
+    fn force_quit(&mut self, ctx: &egui::Context) {
         self.quitting = true;
         self.config.window.width = self.last_size.0;
         self.config.window.height = self.last_size.1;
@@ -1354,6 +1406,19 @@ impl HebnixApp {
             self.config.window.y = Some(y);
         }
         self.save_config();
+
+        if crate::watchdog::handoff_live_spoofer(Arc::clone(&self.spoofer_mgr)) {
+            self.plugin_mgr.unload_all();
+            self.stats.stop();
+            self.ws_stats.stop();
+            self.monitor.stop();
+            self.discord_presence.stop();
+            self.tray = None;
+            // Keep the proxy alive without leaving a transparent viewport on screen.
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
 
         self.spoofer_mgr.shutdown();
         self.plugin_mgr.unload_all();
@@ -1369,12 +1434,18 @@ impl HebnixApp {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
                 AppMsg::Log(s) => self.console.write(s),
+                AppMsg::RlApiCaptureReady(result) => {
+                    self.rlapi_panel.starting = false;
+                    if let Err(error) = result { self.rlapi_panel.complete(Err(error)); }
+                }
+                AppMsg::RlApiResponse(result) => self.rlapi_panel.complete(result),
                 AppMsg::GameEvent(event) => self.handle_game_event(event),
                 AppMsg::RlStatus {
                     rl_open,
                     api_open,
                     root_dir,
                 } => {
+                    self.spoofer_mgr.cleanup_idle_rlapi();
                     let rl_state_changed = rl_open != self.last_rl_open;
                     let mut platform_changed = false;
                     if let Some(root) = root_dir {
@@ -2792,6 +2863,7 @@ impl HebnixApp {
                                         })
                                         .unwrap_or_else(|| egui::RichText::new("All"));
                                     egui::ComboBox::from_id_salt("title_spoof_target")
+                                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
                                         .width(210.0)
                                         .height(320.0)
                                         .selected_text(selected_title)
@@ -2860,6 +2932,7 @@ impl HebnixApp {
                                             egui::RichText::new("Choose a title...")
                                         });
                                     egui::ComboBox::from_id_salt("title_spoof_copy")
+                                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
                                         .width(250.0)
                                         .height(320.0)
                                         .selected_text(copy_label)
@@ -3637,6 +3710,15 @@ impl HebnixApp {
                                     .configure(self.config.settings.discord_rich_presence);
                                 changed = true;
                             }
+                            if ui
+                                .checkbox(
+                                    &mut self.config.settings.discord_rocket_league_only,
+                                    "Limit Discord RPC to Rocket League only",
+                                )
+                                .changed()
+                            {
+                                changed = true;
+                            }
                             ui.add_space(8.0);
                             ui.label("Message:");
                             let mut game_state = self.config.settings.discord_game_state;
@@ -4083,9 +4165,24 @@ fn render_about_tab(&mut self, ui: &mut egui::Ui) {
         self.spawner_subtab = SpawnerSubTab::Tutorial;
         let _ = self.spoofer_mgr.set_item_spawner_enabled(false);
         self.evaluate_proxies();
-        crate::spoofer::hosts::flush_dns();
         clear_rl_cache(&self.tx);
-        self.console.write("[Item Spawner] Disabled and DNS flushed.");
+        if self.spoofer_mgr.http_running() || self.spoofer_mgr.socket_running() {
+            self.console.write(
+                "[Item Spawner] Disabled. Hosts redirects remain for other enabled Spoofer features."
+            );
+        } else {
+            match crate::spoofer::hosts::clear() {
+                Ok(()) => {
+                    crate::spoofer::hosts::flush_dns();
+                    self.console.write(
+                        "[Item Spawner] Disabled. Hebnix hosts redirects removed and DNS flushed."
+                    );
+                },
+                Err(error) => self.console.write(format!(
+                    "[Item Spawner] Disabled, but hosts cleanup failed: {error}"
+                )),
+            }
+        }
     }
 
     /// Item spawning rides on the same hosts-file + PsyNet websocket proxy as
@@ -5127,10 +5224,12 @@ fn install_zip(zip_path: &std::path::Path, plugin_dir: &std::path::Path) -> Resu
 
 impl Drop for HebnixApp {
     fn drop(&mut self) {
-        if self.item_spawner_enabled { self.disable_item_spawner(); }
-        // Covers normal eframe shutdown paths that do not go through the
-        // explicit tray/window quit handler.
-        self.spoofer_mgr.shutdown();
+        if !crate::watchdog::has_live_handoff()
+            && !crate::watchdog::handoff_live_spoofer(Arc::clone(&self.spoofer_mgr))
+        {
+            if self.item_spawner_enabled { self.disable_item_spawner(); }
+            self.spoofer_mgr.shutdown();
+        }
         self.workshop.suspend_multiplayer();
         self.discord_presence.stop();
     }
@@ -5148,6 +5247,15 @@ impl eframe::App for HebnixApp {
         }
         for theme_id in crate::deep_link::take_pending_theme_ids(&self.base_dir) {
             self.download_theme(&theme_id);
+        }
+        if self.quitting && crate::watchdog::has_live_handoff() {
+            if !hebnix_sdk::process::is_rocket_league_running() {
+                crate::watchdog::finish_live_handoff();
+                std::process::exit(0);
+            }
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            ctx.request_repaint_after(Duration::from_secs(1));
+            return;
         }
         self.handle_messages(ctx);
 
@@ -5245,6 +5353,7 @@ impl eframe::App for HebnixApp {
                     ui.selectable_value(&mut self.tab, Tab::Patcher, "Items");
                     ui.selectable_value(&mut self.tab, Tab::Settings, "Settings");
                     ui.selectable_value(&mut self.tab, Tab::Plugins, "Plugins");
+                    ui.selectable_value(&mut self.tab, Tab::RlApi, "RLAPI");
                     ui.selectable_value(&mut self.tab, Tab::About, "About");
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -5337,7 +5446,7 @@ impl eframe::App for HebnixApp {
                                         ui.add_space(8.0);
                                         ui.label("Rocket League must be closed before you enable the Item Spawner.");
                                         ui.add_space(8.0);
-                                        ui.label("When you're finished, disable Item Spawner before closing Hebnix, or close Rocket League before closing Hebnix.");
+                                        ui.label("If you close Hebnix while Rocket League is open, its network watchdog stays active until the game exits.");
                                         ui.add_space(8.0);
                                         ui.label("If you have problems connecting to Epic, open Hebnix while Rocket League is closed, enable Item Spawner and disable it again, then open Rocket League.");
                                         ui.add_space(8.0);
@@ -5709,6 +5818,7 @@ impl eframe::App for HebnixApp {
                     }
                     Tab::Settings => self.render_settings_tab(ui),
                     Tab::Plugins => self.render_plugins_tab(ui),
+                    Tab::RlApi => self.render_rlapi_tab(ui),
                     Tab::About => self.render_about_tab(ui),
                 }
             });
