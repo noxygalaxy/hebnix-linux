@@ -28,10 +28,14 @@
 //! worst the window looks like an ordinary KWin window rather than
 //! matching the Windows app's chromeless-floating look).
 //!
-//! On any other (wlroots or not, non-KDE) compositor, neither
-//! `HYPRLAND_INSTANCE_SIGNATURE` nor a KDE session is detected, and we fall
-//! back to an "always focused, geometry unknown" stub so the app doesn't
-//! crash -- a warning is logged once.
+//! niri has its own JSON IPC socket at `$NIRI_SOCKET`: one JSON request
+//! per line (`"Windows"`, `"FocusedWindow"`, `{"Action":{...}}`), answered
+//! with one `{"Ok":{...}}` / `{"Err":"..."}` line. Written from niri's IPC
+//! schema (niri-ipc), not yet tested against a live niri session.
+//!
+//! On any other compositor we fall back to "always focused", and treat RL
+//! as covering the whole monitor (it's almost always fullscreen) so drawn
+//! overlays still show -- a warning is logged once.
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
@@ -46,12 +50,15 @@ use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 enum Compositor {
     Hyprland,
     Kwin,
+    Niri,
     Other,
 }
 
 fn compositor() -> Compositor {
     if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some() {
         Compositor::Hyprland
+    } else if std::env::var_os("NIRI_SOCKET").is_some() {
+        Compositor::Niri
     } else if std::env::var("XDG_CURRENT_DESKTOP")
         .map(|d| d.to_uppercase().contains("KDE"))
         .unwrap_or(false)
@@ -67,8 +74,8 @@ fn warn_unsupported_compositor_once() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         tracing::warn!(
-            "process::window: neither Hyprland nor KDE detected, window focus/geometry \
-             tracking is unavailable -- assuming RL is always focused with unknown geometry"
+            "process::window: no Hyprland, KDE or niri session detected, window focus/geometry \
+             tracking is unavailable -- assuming RL is always focused and fills the monitor"
         );
     });
 }
@@ -262,6 +269,156 @@ fn kscreen_doctor_json() -> Option<Value> {
     serde_json::from_slice(&output.stdout).ok()
 }
 
+// ===================== niri backend =====================
+
+/// one request over niri's IPC socket. `request` is the JSON request value
+/// (`"Windows"`, or `{"Action":{..}}`); returns the payload inside the
+/// `{"Ok": ...}` reply, e.g. `{"Windows":[..]}`.
+fn niri_request(request: &Value) -> Option<Value> {
+    use std::io::BufRead;
+    let path = std::env::var_os("NIRI_SOCKET")?;
+    let mut stream = UnixStream::connect(path).ok()?;
+    stream.set_read_timeout(Some(Duration::from_millis(500))).ok();
+    stream.set_write_timeout(Some(Duration::from_millis(500))).ok();
+    let mut line = serde_json::to_vec(request).ok()?;
+    line.push(b'\n');
+    stream.write_all(&line).ok()?;
+    let mut reply = String::new();
+    std::io::BufReader::new(stream).read_line(&mut reply).ok()?;
+    let mut value: Value = serde_json::from_str(&reply).ok()?;
+    value.get_mut("Ok").map(Value::take)
+}
+
+fn niri_query(name: &str) -> Option<Value> {
+    niri_request(&Value::String(name.to_string()))?.get_mut(name).map(Value::take)
+}
+
+fn niri_action(action: Value) -> bool {
+    niri_request(&serde_json::json!({ "Action": action })).is_some()
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct NiriWindow {
+    id: u64,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    pid: Option<i64>,
+    #[serde(default)]
+    workspace_id: Option<u64>,
+    /// only on newer niri (25.08+)
+    #[serde(default)]
+    layout: Option<NiriWindowLayout>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct NiriWindowLayout {
+    #[serde(default)]
+    window_size: Option<[i32; 2]>,
+    /// tile position within the workspace view, i.e. relative to its
+    /// output; None while the window is off screen
+    #[serde(default)]
+    tile_pos_in_workspace_view: Option<[f64; 2]>,
+    #[serde(default)]
+    window_offset_in_tile: Option<[f64; 2]>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NiriWorkspace {
+    id: u64,
+    #[serde(default)]
+    output: Option<String>,
+}
+
+/// (x, y, width, height) of an output: logical position, physical size
+/// (the physical size is what the monitor-size helpers report elsewhere)
+fn niri_output_rects() -> Vec<(String, (i32, i32, i32, i32))> {
+    let Some(outputs) = niri_query("Outputs") else {
+        return Vec::new();
+    };
+    let Some(outputs) = outputs.as_object() else {
+        return Vec::new();
+    };
+    outputs
+        .iter()
+        .filter_map(|(name, output)| {
+            let logical = output.get("logical")?;
+            let x = logical.get("x")?.as_i64()? as i32;
+            let y = logical.get("y")?.as_i64()? as i32;
+            let mode = output
+                .get("current_mode")
+                .and_then(Value::as_u64)
+                .and_then(|index| output.get("modes")?.get(index as usize));
+            let (w, h) = match mode {
+                Some(mode) => (
+                    mode.get("width")?.as_i64()? as i32,
+                    mode.get("height")?.as_i64()? as i32,
+                ),
+                None => (
+                    logical.get("width")?.as_i64()? as i32,
+                    logical.get("height")?.as_i64()? as i32,
+                ),
+            };
+            Some((name.clone(), (x, y, w, h)))
+        })
+        .collect()
+}
+
+fn niri_windows() -> Vec<NiriWindow> {
+    niri_query("Windows")
+        .and_then(|windows| serde_json::from_value(windows).ok())
+        .unwrap_or_default()
+}
+
+fn niri_rl_window() -> Option<NiriWindow> {
+    niri_windows().into_iter().find(|window| {
+        window
+            .title
+            .as_deref()
+            .is_some_and(|title| title.to_lowercase().contains("rocket league"))
+    })
+}
+
+fn niri_rl_pid() -> Option<u32> {
+    niri_rl_window()?.pid.map(|pid| pid as u32)
+}
+
+fn niri_focused_pid() -> Option<i64> {
+    let window: NiriWindow = serde_json::from_value(niri_query("FocusedWindow")?).ok()?;
+    window.pid
+}
+
+/// the output rect RL's workspace is shown on
+fn niri_rl_output_rect(rl: &NiriWindow) -> Option<(i32, i32, i32, i32)> {
+    let outputs = niri_output_rects();
+    let workspaces: Vec<NiriWorkspace> =
+        serde_json::from_value(niri_query("Workspaces")?).ok()?;
+    let output = rl
+        .workspace_id
+        .and_then(|id| workspaces.into_iter().find(|ws| ws.id == id))
+        .and_then(|ws| ws.output);
+    output
+        .and_then(|name| outputs.iter().find(|(n, _)| *n == name).map(|(_, rect)| *rect))
+        .or_else(|| outputs.first().map(|(_, rect)| *rect))
+}
+
+/// RL's window rect from niri's layout info when it has it (newer niri),
+/// otherwise the whole output RL is on - RL is nearly always fullscreen
+fn niri_rl_window_rect() -> Option<(i32, i32, i32, i32)> {
+    let rl = niri_rl_window()?;
+    let output = niri_rl_output_rect(&rl);
+    let from_layout = rl.layout.as_ref().and_then(|layout| {
+        let [w, h] = layout.window_size?;
+        let [tx, ty] = layout.tile_pos_in_workspace_view?;
+        let [ox, oy] = layout.window_offset_in_tile.unwrap_or([0.0, 0.0]);
+        let (base_x, base_y) = output.map_or((0, 0), |(x, y, _, _)| (x, y));
+        let left = base_x + (tx + ox).round() as i32;
+        let top = base_y + (ty + oy).round() as i32;
+        (w > 0 && h > 0).then_some((left, top, left + w, top + h))
+    });
+    from_layout.or_else(|| output.map(|(x, y, w, h)| (x, y, x + w, y + h)))
+}
+
 // ===================== shared cache + dispatch =====================
 
 /// cached RL pid, the process scan / kdotool round-trip costs real time and
@@ -277,6 +434,7 @@ fn cached_rl_pid() -> Option<u32> {
     let pid = match compositor() {
         Compositor::Hyprland => hyprland_rl_pid(),
         Compositor::Kwin => kwin_rl_pid(),
+        Compositor::Niri => niri_rl_pid(),
         Compositor::Other => None,
     }
     .or_else(|| {
@@ -324,6 +482,7 @@ pub fn is_rocket_league_focused() -> bool {
             };
             active_pid.parse::<u32>().map(|p| p == pid).unwrap_or(false)
         }
+        Compositor::Niri => niri_focused_pid() == Some(pid as i64),
         Compositor::Other => {
             warn_unsupported_compositor_once();
             // no window tracking available: assume focused so overlays/binds
@@ -345,6 +504,7 @@ pub fn is_pid_focused(pid: u32) -> bool {
         Compositor::Kwin => kdotool_line(&["getactivewindow", "getwindowpid"])
             .and_then(|active| active.parse::<u32>().ok())
             == Some(pid),
+        Compositor::Niri => niri_focused_pid() == Some(pid as i64),
         Compositor::Other => false,
     }
 }
@@ -368,9 +528,14 @@ pub fn get_rocket_league_window_rect() -> Option<(i32, i32, i32, i32)> {
             }
         }
         Compositor::Kwin => kwin_rl_window_rect(),
+        Compositor::Niri => niri_rl_window_rect(),
         Compositor::Other => {
+            // no geometry available: assume RL fills the monitor (it's
+            // almost always fullscreen) rather than returning None, which
+            // hides every drawn overlay
             warn_unsupported_compositor_once();
-            None
+            let (w, h) = rocket_league_monitor_size();
+            Some((0, 0, w, h))
         }
     }
 }
@@ -495,6 +660,27 @@ pub fn focus_own_window_over_game(own_pid: u32) -> bool {
             kdotool_lines(&["search", "--name", "^Hebnix$", "windowactivate", "windowraise"])
                 .is_some()
         }
+        Compositor::Niri => {
+            let windows = niri_windows();
+            let Some(own) = windows.iter().find(|w| w.pid == Some(own_pid as i64)) else {
+                return false;
+            };
+            let rl_workspace = cached_rl_pid().and_then(|pid| {
+                windows
+                    .iter()
+                    .find(|w| w.pid == Some(pid as i64))
+                    .and_then(|w| w.workspace_id)
+            });
+            if let Some(workspace) = rl_workspace.filter(|&ws| Some(ws) != own.workspace_id) {
+                niri_action(serde_json::json!({ "MoveWindowToWorkspace": {
+                    "window_id": own.id,
+                    "reference": { "Id": workspace },
+                    "focus": false,
+                }}));
+            }
+            niri_action(serde_json::json!({ "MoveWindowToFloating": { "id": own.id } }));
+            niri_action(serde_json::json!({ "FocusWindow": { "id": own.id } }))
+        }
         Compositor::Other => {
             warn_unsupported_compositor_once();
             false
@@ -514,7 +700,8 @@ pub fn unminimize_own_window() -> bool {
             kdotool_lines(&["search", "--name", "^Hebnix$", "windowactivate", "windowraise"])
                 .is_some()
         }
-        Compositor::Hyprland | Compositor::Other => false,
+        // no minimize on Hyprland or niri
+        Compositor::Hyprland | Compositor::Niri | Compositor::Other => false,
     }
 }
 
@@ -582,6 +769,14 @@ pub fn rocket_league_monitor_size() -> (i32, i32) {
                 }
             }
         }
+        Compositor::Niri => {
+            let output = niri_rl_window().and_then(|rl| niri_rl_output_rect(&rl));
+            if let Some((_, _, w, h)) =
+                output.or_else(|| niri_output_rects().first().map(|(_, rect)| *rect))
+            {
+                return (w, h);
+            }
+        }
         Compositor::Other => warn_unsupported_compositor_once(),
     }
     (1920, 1080)
@@ -619,7 +814,35 @@ pub fn is_cursor_inside_rl_window() -> bool {
                 _ => return false,
             }
         }
-        Compositor::Other => return false,
+        // no cursor position over niri's IPC
+        Compositor::Niri | Compositor::Other => return false,
     };
     left <= x && x <= right && top <= y && y <= bottom
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_a_niri_window_with_and_without_layout() {
+        let windows: Vec<NiriWindow> = serde_json::from_value(serde_json::json!([
+            {
+                "id": 12, "title": "Rocket League (64-bit, DX11, Cooked)", "app_id": "steam_app_252950",
+                "pid": 4242, "workspace_id": 3, "is_focused": true, "is_floating": false,
+                "is_urgent": false,
+                "layout": {
+                    "pos_in_scrolling_layout": [1, 1], "tile_size": [2560.0, 1440.0],
+                    "window_size": [2560, 1440], "tile_pos_in_workspace_view": [0.0, 0.0],
+                    "window_offset_in_tile": [0.0, 0.0]
+                }
+            },
+            { "id": 13, "title": "Hebnix", "app_id": "Hebnix", "pid": 99, "workspace_id": 3,
+              "is_focused": false, "is_floating": true }
+        ]))
+        .expect("niri Windows reply should parse");
+        assert_eq!(windows[0].pid, Some(4242));
+        assert_eq!(windows[0].layout.as_ref().and_then(|l| l.window_size), Some([2560, 1440]));
+        assert!(windows[1].layout.is_none());
+    }
 }
