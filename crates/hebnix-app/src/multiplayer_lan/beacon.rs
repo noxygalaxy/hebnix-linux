@@ -24,6 +24,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use socket2::{Domain, Socket, Type};
 
 // linux/if_ether.h, linux/if_packet.h
+const ETH_P_ALL: u16 = 0x0003;
 const ETH_P_IP: u16 = 0x0800;
 const PACKET_OUTGOING: u8 = 4;
 
@@ -49,7 +50,9 @@ impl RawCapture {
             libc::socket(
                 libc::AF_PACKET,
                 libc::SOCK_DGRAM | libc::SOCK_CLOEXEC,
-                i32::from(ETH_P_IP.to_be()),
+                // the kernel hands outgoing packets only to ETH_P_ALL
+                // taps; a socket bound to ETH_P_IP only sees received ones
+                i32::from(ETH_P_ALL.to_be()),
             )
         };
         if fd < 0 {
@@ -99,7 +102,9 @@ impl RawCapture {
                 _ => Err(error),
             };
         }
-        Ok((address.sll_pkttype == PACKET_OUTGOING).then_some(len as usize))
+        let outgoing_ipv4 = address.sll_pkttype == PACKET_OUTGOING
+            && u16::from_be(address.sll_protocol) == ETH_P_IP;
+        Ok(outgoing_ipv4.then_some(len as usize))
     }
 
     fn shutdown(&self) {
