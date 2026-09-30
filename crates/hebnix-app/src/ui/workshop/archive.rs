@@ -206,6 +206,8 @@ struct Shared {
 #[derive(Default)]
 pub struct ArchiveBrowser {
     search: String,
+    /// the map list is shown; hiding it keeps the loaded list for later
+    show_list: bool,
     loading: Arc<AtomicBool>,
     downloading: Arc<AtomicBool>,
     shared: Arc<Mutex<Shared>>,
@@ -282,27 +284,36 @@ impl ArchiveBrowser {
 
         let mut download = None;
         let mut imported = None;
+        let loaded = self.shared.lock().is_ok_and(|s| s.index.is_some());
         ui.horizontal(|ui| {
-            let label = if self.shared.lock().is_ok_and(|s| s.index.is_some()) {
-                "Refresh list"
+            if !self.show_list {
+                if ui.add_enabled(!loading, egui::Button::new("Show archive maps")).clicked() {
+                    self.show_list = true;
+                    if !loaded {
+                        self.load(ui.ctx());
+                    }
+                }
             } else {
-                "Show archive maps"
-            };
-            if ui.add_enabled(!loading, egui::Button::new(label)).clicked() {
-                self.load(ui.ctx());
+                if ui.button("Hide list").clicked() {
+                    self.show_list = false;
+                }
+                if ui.add_enabled(!loading, egui::Button::new("Refresh list")).clicked() {
+                    self.load(ui.ctx());
+                }
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.search)
+                        .hint_text("Search name, author or tag...")
+                        .desired_width(220.0),
+                );
             }
             if loading {
                 ui.spinner();
             }
-            ui.add(
-                egui::TextEdit::singleline(&mut self.search)
-                    .hint_text("Search name, author or tag...")
-                    .desired_width(220.0),
-            );
         });
 
         if let Ok(mut shared) = self.shared.lock() {
             match &shared.index {
+                Some(Ok(_)) if !self.show_list => {}
                 Some(Ok(maps)) => {
                     let shown: Vec<&ArchiveMap> = maps.iter().filter(|m| m.matches(&self.search)).collect();
                     ui.small(format!("{} of {} maps", shown.len(), maps.len()));
