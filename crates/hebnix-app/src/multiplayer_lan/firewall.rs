@@ -7,29 +7,39 @@
 //! add here. This adds an allow rule to our own `inet hebnix` table (the
 //! common case: no separate restrictive firewall active), but isn't a
 //! substitute for the user allowing the ports themselves if they run one.
-//! Requires CAP_NET_ADMIN (same capability the TAP device needs).
+//! Requires CAP_NET_ADMIN (same capability tailscaled needs).
 
 use std::path::Path;
 
 const CHAIN_IN: &str = "input";
-const LAN_PORTS: &str = "7777-7778, 14000-14010";
+const LAN_PORTS: &str = "7777-7778, 14000-14010, 14777";
+const DISCOVERY_PORTS: &str = "14000-14010, 14777";
+/// the headscale server hands out addresses from this range
+const TAILNET_SUBNET: &str = "10.242.77.0/24";
 
-pub fn ensure_host_rule(executable: &Path, port: u16) -> Result<(), String> {
-    ensure_table()?;
-    let comment = format!("hebnix-workshop-lan-host-{port}");
-    ensure_udp_rule(&comment, &format!("udp dport {port}"), executable)
+/// tailscaled only makes outbound connections and receives WireGuard on
+/// sockets it opened itself, which conntrack already lets back in
+pub fn ensure_sidecar_rule(executable: &Path) -> Result<(), String> {
+    let _ = executable;
+    Ok(())
 }
 
-pub fn ensure_join_rule_if_needed(
-    executable: &Path,
-    host_ip: &str,
-    host_port: u16,
-) -> Result<(), String> {
+/// relayed beacons from peers arrive on the discovery ports
+pub fn ensure_beacon_relay_rule(executable: &Path) -> Result<(), String> {
     ensure_table()?;
-    let comment = format!("hebnix-workshop-lan-guest-{host_ip}-{host_port}");
-    ensure_udp_rule(
-        &comment,
-        &format!("ip saddr {host_ip} udp sport {host_port}"),
+    ensure_rule(
+        "hebnix-workshop-lan-beacon",
+        &format!("ip saddr {TAILNET_SUBNET} udp dport {{ {DISCOVERY_PORTS} }}"),
+        executable,
+    )
+}
+
+/// the map sync service (see map_sync.rs), from tailnet peers only
+pub fn ensure_map_sync_rule(executable: &Path) -> Result<(), String> {
+    ensure_table()?;
+    ensure_rule(
+        "hebnix-workshop-map-sync",
+        &format!("ip saddr {TAILNET_SUBNET} tcp dport {}", super::MAP_SYNC_PORT),
         executable,
     )
 }
@@ -37,7 +47,7 @@ pub fn ensure_join_rule_if_needed(
 pub fn ensure_rocket_league_lan_rule(executable: &Path, remote: &str) -> Result<(), String> {
     ensure_table()?;
     let comment = format!("hebnix-workshop-lan-rl-{remote}");
-    ensure_udp_rule(
+    ensure_rule(
         &comment,
         &format!("ip saddr {remote} udp dport {{ {LAN_PORTS} }}"),
         executable,
@@ -46,12 +56,12 @@ pub fn ensure_rocket_league_lan_rule(executable: &Path, remote: &str) -> Result<
 
 pub fn remove_rules() -> Result<(), String> {
     // dropping the whole table removes every rule we ever added in one shot
-    let _ = super::tap::command_with_net_admin("nft").args(["delete", "table", "inet", "hebnix"]).output();
+    let _ = super::caps::command_with_net_admin("nft").args(["delete", "table", "inet", "hebnix"]).output();
     Ok(())
 }
 
 fn ensure_table() -> Result<(), String> {
-    let exists = super::tap::command_with_net_admin("nft")
+    let exists = super::caps::command_with_net_admin("nft")
         .args(["list", "table", "inet", "hebnix"])
         .output()
         .map(|o| o.status.success())
@@ -66,7 +76,7 @@ fn ensure_table() -> Result<(), String> {
     ])
 }
 
-fn ensure_udp_rule(comment: &str, matcher: &str, executable: &Path) -> Result<(), String> {
+fn ensure_rule(comment: &str, matcher: &str, executable: &Path) -> Result<(), String> {
     if rule_exists(comment)? {
         return Ok(());
     }
@@ -83,7 +93,7 @@ fn ensure_udp_rule(comment: &str, matcher: &str, executable: &Path) -> Result<()
 }
 
 fn rule_exists(comment: &str) -> Result<bool, String> {
-    let output = super::tap::command_with_net_admin("nft")
+    let output = super::caps::command_with_net_admin("nft")
         .args(["list", "table", "inet", "hebnix"])
         .output()
         .map_err(|e| format!("could not query nftables: {e}"))?;
@@ -91,7 +101,7 @@ fn rule_exists(comment: &str) -> Result<bool, String> {
 }
 
 fn run(args: &[&str]) -> Result<(), String> {
-    let output = super::tap::command_with_net_admin("nft")
+    let output = super::caps::command_with_net_admin("nft")
         .args(args)
         .output()
         .map_err(|e| format!("could not update nftables: {e}"))?;

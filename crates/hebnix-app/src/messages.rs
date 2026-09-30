@@ -39,20 +39,19 @@ pub enum AppMsg {
     },
     BackgroundChangerDone(Result<String, String>),
     WorkshopMultiplayerProgress(String),
-    WorkshopMultiplayerPrepared {
-        result: Result<
-            (
-                crate::multiplayer_lan::TapSession,
-                Option<crate::multiplayer_lan::JoinedRoom>,
-            ),
-            String,
-        >,
+    // result of spawning the tsnet sidecar and requesting the tailnet come up
+    WorkshopTailnetStarted {
+        result: Result<std::sync::Arc<crate::multiplayer_lan::TsnetSidecarHandle>, String>,
     },
-    WorkshopHostStarted {
+    // result of launching Rocket League with the tailnet multihome address
+    // (and, for a guest, joining the room first)
+    WorkshopMultiplayerLaunched {
+        result: Result<(), String>,
+    },
+    // fires whether this peer ended up hosting or joining inside Rocket
+    // League - the relay itself doesn't care which, see hosting.rs
+    WorkshopRelayStarted {
         result: Result<crate::multiplayer_lan::HostSession, String>,
-    },
-    WorkshopGuestJoined {
-        result: Result<crate::multiplayer_lan::GuestSession, String>,
     },
     WorkshopPlayerUpdated {
         result: Result<(), String>,
@@ -60,11 +59,9 @@ pub enum AppMsg {
     WorkshopHostSessionCheck {
         result: Result<crate::multiplayer_lan::Room, String>,
     },
-    WorkshopWizardCheck {
+    WorkshopLaunchCheck {
         rl_open: bool,
-        tap_ready: bool,
         launch_ready: bool,
-        detected_map: Option<String>,
     },
     // "install from hebnix" plugin metadata fetch done
     PluginFetch {
@@ -139,7 +136,7 @@ pub enum AppMsg {
     /// AppImage own that instead)
     StartupPluginUpdateCheck,
     /// result of the "Grant permission" pkexec prompt for Workshop LAN's
-    /// cap_net_admin - Ok(()) triggers a self-relaunch since a capability
+    /// capabilities - Ok(()) triggers a self-relaunch since a capability
     /// change on our own file doesn't apply to the already-running process
     NetAdminGranted {
         result: Result<(), String>,
@@ -159,4 +156,22 @@ pub enum AppMsg {
         slug: String,
         data: Value,
     },
+    // result of a "bring the tailnet up" request to the tsnet sidecar
+    TsnetUpResult {
+        result: Result<String, String>,
+    },
+    TsnetStatus {
+        state: crate::multiplayer_lan::TsState,
+        tailnet_ip: Option<String>,
+        peers: Vec<crate::multiplayer_lan::PeerInfo>,
+    },
+    TsnetPeerEvent {
+        online: bool,
+        tailnet_ip: String,
+    },
+    TsnetDownResult {
+        ok: bool,
+    },
+    // the sidecar's control connection dropped (crash, or it exited)
+    TsnetSidecarDisconnected,
 }

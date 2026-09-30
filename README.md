@@ -39,16 +39,32 @@ unset)
 
 ## Workshop LAN multiplayer
 
-LAN multiplayer sets up a virtual network adapter and nftables rules,
-which needs `CAP_NET_ADMIN` on the `hebnix` binary. `install.sh` offers to
-grant this for you after installing; to do it yourself:
+Workshop multiplayer joins a private Tailscale network (tailnet) for the
+session. Hebnix starts its **own** `tailscaled` with its own interface
+(`hebnixts0`), socket and state, separate from any Tailscale you already
+use, so you only need the `tailscale` package installed (Arch: `sudo pacman
+-S tailscale`; others: https://tailscale.com/download/linux). The system
+`tailscaled` service does not need to be enabled. No package? Put the
+`tailscale` and `tailscaled` binaries in `~/.config/hebnix/tailscale-bin/`.
+
+It needs `CAP_NET_ADMIN` and `CAP_NET_RAW` on the `hebnix` binary (for the
+network interface, firewall rules and the LAN beacon relay). The
+Multiplayer tab has a Grant permission button, and `install.sh` offers to
+do it after installing. To do it yourself:
 
 ```sh
-sudo setcap cap_net_admin+eip ~/.local/bin/hebnix
+sudo setcap cap_net_admin,cap_net_raw+eip ~/.local/bin/hebnix
 ```
 
 Everything else in the app works fine without it — this only gates LAN
 multiplayer.
+
+### Importing maps / Steam Workshop downloads
+
+The Import Map tab adds a `.upk`/`.udk` you already have. Downloading
+straight from the Steam Workshop by item id also needs a .NET 9 (or newer)
+runtime (`dotnet-runtime`) and DepotDownloaderMod's files in
+`~/.config/hebnix/depotdownloader/`.
 
 ## Build & install
 

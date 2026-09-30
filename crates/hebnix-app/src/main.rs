@@ -187,9 +187,9 @@ fn main() -> eframe::Result {
     deep_link::register_and_queue_from_args(&base_dir);
     setup_panic_hook(&base_dir);
     tracing::info!("Hebnix {} starting", app::APP_VERSION);
-    // no-op unless the binary was setcap'd with cap_net_admin+eip - lets
-    // Workshop LAN multiplayer's `ip`/`nft` child processes inherit the
-    // capability instead of needing it set on those binaries themselves.
+    // no-op unless the binary was setcap'd (see multiplayer_lan::GRANTED_CAPS) -
+    // lets Workshop LAN multiplayer's `nft`/`tailscaled` child processes
+    // inherit the capabilities instead of needing them set on those binaries.
     multiplayer_lan::raise_net_admin_ambient();
 
     let cfg = config::Config::load(&base_dir);

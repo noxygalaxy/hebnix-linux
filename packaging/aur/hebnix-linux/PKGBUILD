@@ -43,6 +43,8 @@ options=('!lto')
 optdepends=(
 	'kdotool: window focus tracking on KDE/Plasma (AUR)'
 	'kscreen: kscreen-doctor, used for monitor info on KDE/Plasma'
+	'tailscale: Workshop LAN multiplayer (Hebnix runs its own separate tailscaled)'
+	'dotnet-runtime: downloading Steam Workshop maps in the Import Map tab'
 )
 provides=('hebnix')
 conflicts=('hebnix-linux-bin')
