@@ -60,6 +60,10 @@ pub struct SettingsCfg {
     /// main window bg opacity (0.5-1.0)
     pub window_opacity: f32,
     pub start_in_tray: bool,
+    /// the toggle hotkey minimizes the window instead of only making it
+    /// transparent and click-through, for desktops where that leaves it
+    /// sitting in the taskbar or blocking the desktop
+    pub minimize_to_tray: bool,
     pub rl_path: String,
     pub statsapi_path: String,
     pub suppress_left_alerts: bool,
@@ -85,6 +89,7 @@ impl Default for SettingsCfg {
             theme: "Dark".to_string(),
             window_opacity: 0.96,
             start_in_tray: false,
+            minimize_to_tray: false,
             rl_path: default_rl_path(),
             statsapi_path: default_statsapi_path(),
             suppress_left_alerts: false,

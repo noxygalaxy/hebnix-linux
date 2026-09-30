@@ -502,6 +502,22 @@ pub fn focus_own_window_over_game(own_pid: u32) -> bool {
     }
 }
 
+/// un-minimize and activate our own window in place, without the
+/// workspace move `focus_own_window_over_game` does. A Wayland client can't
+/// un-minimize itself (winit ignores it), and a minimized surface gets no
+/// frame callbacks, so the app's own event loop stalls until something
+/// outside it brings the window back - this is that something. Hyprland has
+/// no minimize at all, so there's nothing to undo there.
+pub fn unminimize_own_window() -> bool {
+    match compositor() {
+        Compositor::Kwin => {
+            kdotool_lines(&["search", "--name", "^Hebnix$", "windowactivate", "windowraise"])
+                .is_some()
+        }
+        Compositor::Hyprland | Compositor::Other => false,
+    }
+}
+
 /// pixel size of the monitor RL is on, falls back to the first monitor
 /// reported by the compositor, or a 1920x1080 guess if nothing is
 /// available.

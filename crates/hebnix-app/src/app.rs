@@ -664,6 +664,7 @@ impl HebnixApp {
         let _ = config.save(&base_dir);
 
         let hidden = config.settings.start_in_tray;
+        winutil::set_minimize_to_tray(config.settings.minimize_to_tray);
         let tray = Tray::new(&base_dir, "Hebnix", hidden);
         if let Some(tray) = &tray {
             let open_id = tray.open_id.clone();
@@ -676,6 +677,7 @@ impl HebnixApp {
                     let receiver = tray_icon::menu::MenuEvent::receiver();
                     while let Ok(event) = receiver.recv() {
                         if event.id == open_id {
+                            winutil::wake_minimized_main_window();
                             let _ = tx.send(AppMsg::TrayOpen);
                         } else if event.id == quit_id {
                             let _ = tx.send(AppMsg::TrayQuit);
@@ -692,6 +694,7 @@ impl HebnixApp {
             let tx = tx.clone();
             let ctx = cc.egui_ctx.clone();
             crate::hotkey::spawn_poller(hk.shared_key(), move || {
+                winutil::wake_minimized_main_window();
                 let _ = tx.send(AppMsg::ToggleVisibility);
                 ctx.request_repaint();
             });
@@ -1349,6 +1352,16 @@ impl HebnixApp {
         // which left a blank transparent window sitting on screen.
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(!hidden));
         ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(hidden));
+        if winutil::minimize_to_tray() {
+            // the window keeps its transparent/click-through state too, so
+            // a compositor that ignores minimize (Hyprland) behaves as
+            // before. Un-minimizing only works from here on X11; on
+            // Wayland wake_minimized_main_window() already did it.
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(hidden));
+            if !hidden {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            }
+        }
 
         if hidden {
             self.topmost = false;
@@ -3870,6 +3883,21 @@ impl HebnixApp {
                             ui.horizontal(|ui| {
                                 ui.add_sized([130.0, 20.0], egui::Label::new("Start in Tray:"));
                                 if ui.checkbox(&mut self.config.settings.start_in_tray, "").changed() {
+                                    self.save_config();
+                                }
+                            });
+                            ui.horizontal(|ui| {
+                                ui.add_sized([130.0, 20.0], egui::Label::new("Minimize to Tray:"));
+                                let response = ui
+                                    .checkbox(&mut self.config.settings.minimize_to_tray, "")
+                                    .on_hover_text(
+                                        "The toggle hotkey minimizes Hebnix instead of only hiding it. \
+                                         Turn this on if the hidden window still shows in your taskbar \
+                                         or blocks your desktop (GNOME, KDE and other desktops). \
+                                         Bring it back with the hotkey, the tray icon or your taskbar.",
+                                    );
+                                if response.changed() {
+                                    winutil::set_minimize_to_tray(self.config.settings.minimize_to_tray);
                                     self.save_config();
                                 }
                             });

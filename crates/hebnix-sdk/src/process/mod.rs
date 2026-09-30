@@ -15,4 +15,5 @@ pub use window::{
     exempt_own_window_decorations, focus_own_window_over_game, get_rocket_league_window_rect,
     hyprland_layer_visible, is_cursor_inside_rl_window, is_rocket_league_focused,
     reassert_own_window_decorations, rocket_league_hwnd, rocket_league_monitor_size,
+    unminimize_own_window,
 };

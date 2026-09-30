@@ -155,6 +155,28 @@ pub fn set_main_window_invisible(invisible: bool) {
     MAIN_HIDDEN.store(invisible, Ordering::Relaxed);
 }
 
+// "Minimize to Tray" setting, mirrored here so the hotkey and tray threads
+// can read it without going through the app
+static MINIMIZE_TO_TRAY: AtomicBool = AtomicBool::new(false);
+
+pub fn set_minimize_to_tray(enabled: bool) {
+    MINIMIZE_TO_TRAY.store(enabled, Ordering::Relaxed);
+}
+
+pub fn minimize_to_tray() -> bool {
+    MINIMIZE_TO_TRAY.load(Ordering::Relaxed)
+}
+
+/// called from the hotkey/tray threads before they ask the app to show the
+/// window: a window minimized on Wayland stops getting redraws, so the app
+/// would never see that request until the window is back. Only acts while
+/// minimized to tray.
+pub fn wake_minimized_main_window() {
+    if minimize_to_tray() && main_window_hidden() {
+        hebnix_sdk::process::unminimize_own_window();
+    }
+}
+
 // run-at-startup via XDG autostart
 
 fn autostart_path() -> std::path::PathBuf {
