@@ -47,8 +47,8 @@ pub use caps::{
 /// said he'll likely just run headscale on the existing api.hebnix.com box
 /// rather than standing up a separate subdomain, so this points there by
 /// default -- update this one constant if he ends up hosting it elsewhere.
-pub const TSNET_CONTROL_URL: &str = "https://hs.xplodingeggo.space"; // TEST ONLY, do not commit
-pub const ROOM_API_BASE_URL: &str = "https://hs.xplodingeggo.space"; // TEST ONLY, do not commit
+pub const TSNET_CONTROL_URL: &str = "https://mp.hebnix.com";
+pub const ROOM_API_BASE_URL: &str = "https://mp.hebnix.com";
 
 /// Rocket League's actual game traffic port. This is the value rewritten
 /// *inside* the beacon payload (the "join me at ip:port" the packet

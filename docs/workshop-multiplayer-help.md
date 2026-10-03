@@ -33,7 +33,7 @@ In the config file (or the app's DNS override / rules settings), add:
 ```yaml
 dns:
   fake-ip-filter:
-    - "hs.xplodingeggo.space"
+    - "mp.hebnix.com"
     - "+.tailscale.com"
     - "+.tailscale.io"
 
@@ -43,7 +43,7 @@ tun:
 
 rules:
   # put these at the very top of your rules
-  - DOMAIN,hs.xplodingeggo.space,DIRECT
+  - DOMAIN,mp.hebnix.com,DIRECT
   - PROCESS-NAME,tailscaled,DIRECT
   - IP-CIDR,10.242.77.0/24,DIRECT,no-resolve
 ```
