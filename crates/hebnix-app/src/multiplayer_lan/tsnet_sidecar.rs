@@ -248,7 +248,10 @@ impl TsnetSidecarHandle {
                 });
             }
             Err(error) => {
-                let _ = tx.send(AppMsg::Log(format!("[tsnet] status check failed: {error}")));
+                let _ = tx.send(AppMsg::Log(format!(
+                    "[tsnet] status check failed: {}",
+                    redact(&error)
+                )));
             }
         });
         Ok(())
@@ -630,7 +633,6 @@ mod tests {
         assert!(out.contains("\n\n\t"), "{out}");
         assert_eq!(redact("key tskey-abc, ok"), "key <hidden> ok");
     }
-
 
     #[test]
     fn status_json_with_null_peer_and_ips_parses() {

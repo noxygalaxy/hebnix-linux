@@ -6,3 +6,6 @@ __pycache__/
 
 # req.hebnix.com TOTP secret - never commit
 req_key.txt
+
+# Headscale pre-auth key embedded in local builds, never commit
+hs_key.txt

@@ -35,8 +35,11 @@ permissions:
 
 # TOTP secret for req.hebnix.com, baked in at build time (see hebnix-sdk/build.rs).
 # Set the HEBNIX_REQ_KEY repository secret; without it the build sends no token.
+# Headscale pre-auth key for Workshop multiplayer (see hebnix-app/build.rs).
+# Set the HEBNIX_HS_KEY repository secret; without it multiplayer can't connect.
 env:
   HEBNIX_REQ_KEY: ${{ secrets.HEBNIX_REQ_KEY }}
+  HEBNIX_HS_KEY: ${{ secrets.HEBNIX_HS_KEY }}
 
 jobs:
   release:
