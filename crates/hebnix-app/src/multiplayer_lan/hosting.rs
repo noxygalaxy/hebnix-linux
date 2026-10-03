@@ -8,10 +8,10 @@ use std::thread::{self, JoinHandle};
 
 use crossbeam_channel::Sender;
 
-use crate::messages::AppMsg;
 use super::beacon::BeaconRelay;
 use super::map_sync::{MapFileProvider, MapProvider, MapSync, PeerOffer};
 use super::{PACKET_PUMP_INTERVAL, PEER_REFRESH_INTERVAL, TsnetSidecarHandle, TunnelStats};
+use crate::messages::AppMsg;
 
 pub struct HostSession {
     pub stats: Arc<TunnelStats>,
@@ -85,7 +85,9 @@ impl HostSession {
                         .collect()
                 })
                 .unwrap_or_default();
-            worker_stats.connected.store(!guest_ips.is_empty(), Ordering::Relaxed);
+            worker_stats
+                .connected
+                .store(!guest_ips.is_empty(), Ordering::Relaxed);
             let mut next_refresh = std::time::Instant::now() + PEER_REFRESH_INTERVAL;
             loop {
                 if stop_receiver.try_recv().is_ok() {
@@ -99,6 +101,7 @@ impl HostSession {
                         guest_ips.len()
                     )));
                     let rewritten = rewrite_lan_beacon_payload(payload, host_octets);
+                    let mut relayed = 0;
                     for &guest_ip in &guest_ips {
                         // don't echo the beacon back to whoever it came from
                         if guest_ip == source.ip() {
@@ -108,15 +111,19 @@ impl HostSession {
                         match relay.send_to(&rewritten, guest) {
                             Ok(()) => {
                                 worker_stats.sent.fetch_add(1, Ordering::Relaxed);
-                                if let Ok(mut value) = worker_stats.last_beacon_relayed.lock() {
-                                    *value = format!("beacon → {guest}");
-                                }
+                                relayed += 1;
                             }
                             Err(error) => {
                                 let _ = tx.send(AppMsg::Log(format!(
                                     "[Core] Beacon relay failed to send to {guest}: {error}"
                                 )));
                             }
+                        }
+                    }
+                    // shown in the ui, so no addresses in it
+                    if relayed > 0 {
+                        if let Ok(mut value) = worker_stats.last_beacon_relayed.lock() {
+                            *value = format!("beacon relayed to {relayed} player(s)");
                         }
                     }
                 }
@@ -147,7 +154,29 @@ impl HostSession {
 
     /// workshop maps online peers say they have installed
     pub fn peer_offers(&self) -> Vec<PeerOffer> {
-        self.map_sync.as_ref().map(MapSync::offers).unwrap_or_default()
+        self.map_sync
+            .as_ref()
+            .map(MapSync::offers)
+            .unwrap_or_default()
+    }
+
+    /// hides a player's maps and refuses their map sync connections for the
+    /// rest of this session
+    pub fn block(&self, ip: std::net::IpAddr, label: String) {
+        if let Some(map_sync) = &self.map_sync {
+            map_sync.block(ip, label);
+        }
+    }
+
+    pub fn unblock(&self, ip: std::net::IpAddr) {
+        if let Some(map_sync) = &self.map_sync {
+            map_sync.unblock(ip);
+        }
+    }
+
+    /// players blocked this session, by name
+    pub fn blocked(&self) -> Vec<(std::net::IpAddr, String)> {
+        self.map_sync.as_ref().map(MapSync::blocked).unwrap_or_default()
     }
 
     pub fn suspend(&mut self) {
@@ -227,7 +256,10 @@ fn find_unreal_lan_endpoint(
                         return Some((
                             offset,
                             4 + chars * 2,
-                            unreal_utf16_string(&format!("{replacement_ip}:{}", super::RL_LAN_PORT)),
+                            unreal_utf16_string(&format!(
+                                "{replacement_ip}:{}",
+                                super::RL_LAN_PORT
+                            )),
                         ));
                     }
                 }
@@ -290,7 +322,8 @@ fn is_lan_game_endpoint(value: &str) -> bool {
     let Some((address, port)) = value.rsplit_once(':') else {
         return false;
     };
-    port.parse::<u16>().is_ok_and(|port| port == super::RL_LAN_PORT)
+    port.parse::<u16>()
+        .is_ok_and(|port| port == super::RL_LAN_PORT)
         && address.parse::<std::net::Ipv4Addr>().is_ok()
 }
 
@@ -318,7 +351,10 @@ impl Drop for HostSession {
 
 #[cfg(test)]
 mod tests {
-    use super::{find_unreal_lan_endpoint, replace_binary_lan_endpoint, replace_equal_length_ascii_endpoint, unreal_ansi_string};
+    use super::{
+        find_unreal_lan_endpoint, replace_binary_lan_endpoint, replace_equal_length_ascii_endpoint,
+        unreal_ansi_string,
+    };
 
     #[test]
     fn rewrites_the_physical_lan_endpoint_to_the_tailnet_host() {
@@ -337,7 +373,10 @@ mod tests {
         // same byte length as the source address -- this rewrite only fires
         // on an exact-length match, by design (see replace_equal_length_ascii_endpoint)
         let mut text = b"172.31.64.1:7777".to_vec();
-        assert!(replace_equal_length_ascii_endpoint(&mut text, "100.64.77.1"));
+        assert!(replace_equal_length_ascii_endpoint(
+            &mut text,
+            "100.64.77.1"
+        ));
         assert_eq!(text, b"100.64.77.1:7777");
     }
 }

@@ -1,3 +1,4 @@
+use crate::i18n::{t, t_args};
 use crate::config::{Config, PatchSource};
 use crate::messages::AppMsg;
 use crate::patcher::catalog::PatchCatalog;
@@ -11,11 +12,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 fn is_ball_backup(name: &str) -> bool {
-    name.strip_suffix(".bak").is_some_and(crate::patcher::patch_core::gameinfo::is_ball_upk)
+    name.strip_suffix(".bak")
+        .is_some_and(crate::patcher::patch_core::gameinfo::is_ball_upk)
         || crate::patcher::patch_core::standard_ball::is_ball_tfc_backup(name)
-        || matches!(name,
-            "Textures2.tfc_3164923583.bin" | "Textures2.tfc_3165101623.bin"
-            | "Textures2.tfc_3165152057.bin" | "Textures2.tfc_3165166143.bin")
+        || matches!(
+            name,
+            "Textures2.tfc_3164923583.bin"
+                | "Textures2.tfc_3165101623.bin"
+                | "Textures2.tfc_3165152057.bin"
+                | "Textures2.tfc_3165166143.bin"
+        )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -195,7 +201,10 @@ impl PatcherState {
 
         std::thread::spawn(move || {
             if let Err(error) = crate::patcher::backup_guard::check(
-                &cooked_pc_clone, &backups_dir_clone, "ball-build.sha256", is_ball_backup,
+                &cooked_pc_clone,
+                &backups_dir_clone,
+                "ball-build.sha256",
+                is_ball_backup,
             ) {
                 let _ = local_tx.send(PatcherOp::Error(error));
                 ctx_clone.request_repaint();
@@ -314,12 +323,12 @@ impl PatcherState {
                         )));
                     } else {
                         let _ =
-                            local_tx.send(PatcherOp::Error("No backups found to restore.".into()));
+                            local_tx.send(PatcherOp::Error(t("spawn-restore-thread-no-backups-found-to-restore").into()));
                     }
                 }
                 Err(_) => {
                     let _ = local_tx.send(PatcherOp::Error(
-                        "Restore hit an unexpected internal error and was aborted.".into(),
+                        t("spawn-restore-thread-restore-hit-an-unexpected-internal-error").into(),
                     ));
                 }
             }
@@ -403,7 +412,10 @@ impl PatcherState {
                     &cooked_clone.to_string_lossy(),
                 )?;
                 crate::patcher::backup_guard::prepare(
-                    &cooked_clone, &backups_clone, "ball-build.sha256", is_ball_backup,
+                    &cooked_clone,
+                    &backups_clone,
+                    "ball-build.sha256",
+                    is_ball_backup,
                 )?;
                 // Legacy mutator texture writes lack compatible offsets and restore coverage.
                 crate::patch_core::standard_ball::patch_standard_tfcs(
@@ -417,7 +429,9 @@ impl PatcherState {
                     &img_bytes,
                 )?;
                 if patched_packages == 0 {
-                    return Err("No matching inline ball mips were found in the current packages.".into());
+                    return Err(
+                        t("spawn-apply-thread-no-matching-inline-ball-mips-were").into(),
+                    );
                 }
                 Ok(())
             }));
@@ -484,7 +498,7 @@ impl PatcherState {
                 egui::ScrollArea::vertical()
                     .id_salt("patcher_subtabs")
                     .show(ui, |ui| {
-                        ui.selectable_value(&mut self.subtab, PatcherSubTab::Ball, "Ball");
+                        ui.selectable_value(&mut self.subtab, PatcherSubTab::Ball, t("render-ball"));
                     });
             });
 
@@ -498,18 +512,15 @@ impl PatcherState {
 
         if let Some(ball_to_delete) = self.confirm_delete.clone() {
             let mut close = false;
-            egui::Window::new("Confirm Deletion")
+            egui::Window::new(t("render-confirm-deletion")).id(egui::Id::new("render-confirm-deletion"))
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
-                    ui.label(format!(
-                        "Are you sure you want to delete '{}'?",
-                        ball_to_delete.name
-                    ));
+                    ui.label(t_args("render-are-you-sure-you-want-to", &[("ball_to_delete", ball_to_delete.name.to_string().into())]));
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        if ui.button("Yes").clicked() {
+                        if ui.button(t("plugin-delete-prompt-yes")).clicked() {
                             let _ = fs::remove_file(&ball_to_delete.json_path);
                             let _ = fs::remove_file(&ball_to_delete.image_path);
 
@@ -526,7 +537,7 @@ impl PatcherState {
                             )));
                             close = true;
                         }
-                        if ui.button("No").clicked() {
+                        if ui.button(t("plugin-delete-prompt-no")).clicked() {
                             close = true;
                         }
                     });
@@ -580,24 +591,24 @@ impl PatcherState {
             ctx.request_repaint();
         }
 
-        ui.heading("Ball Patcher");
+        ui.heading(t("app-ball-patcher"));
         ui.add_space(8.0);
 
         ui.horizontal(|ui| {
-            ui.strong("Search:");
+            ui.strong(t("spoofer-search"));
             let search_resp = ui.add(
                 egui::TextEdit::singleline(&mut self.search_input)
-                    .hint_text("Name or author...")
+                    .hint_text(t("ball-name-or-author"))
                     .desired_width(180.0),
             );
             let submitted =
                 search_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if ui.button("Search").clicked() || submitted {
+            if ui.button(t("ball-search")).clicked() || submitted {
                 self.search_filter = self.search_input.clone();
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Refresh").clicked() {
+                if ui.button(t("btn-refresh")).clicked() {
                     if self.source == PatchSource::Catalog {
                         self.catalog.refresh(ctx);
                     } else {
@@ -611,7 +622,7 @@ impl PatcherState {
                 if ui
                     .add_enabled(
                         restore_enabled,
-                        egui::Button::new("Restore Original")
+                        egui::Button::new(t("ball-restore-original"))
                             .fill(egui::Color32::from_rgb(180, 50, 50)),
                     )
                     .clicked()
@@ -622,11 +633,11 @@ impl PatcherState {
                 if ui
                     .add_enabled(
                         self.processing_target.is_none(),
-                        egui::Button::new("Import ZIP"),
+                        egui::Button::new(t("ball-import-zip")),
                     )
                     .clicked()
                 {
-                    let dialog = rfd::FileDialog::new().add_filter("ZIP Archives", &["zip"]);
+                    let dialog = rfd::FileDialog::new().add_filter(t("ball-zip-archives"), &["zip"]);
                     if let Some(file) = crate::winutil::parent_file_dialog(dialog).pick_file() {
                         if self.import_zip(&file, tx) {
                             self.source = PatchSource::Custom;
@@ -636,7 +647,7 @@ impl PatcherState {
                     }
                 }
                 if ui
-                    .checkbox(&mut self.show_applied, "Show Applied")
+                    .checkbox(&mut self.show_applied, t("ball-show-applied"))
                     .changed()
                 {
                     self.page = 0;
@@ -686,12 +697,12 @@ impl PatcherState {
                     ui.vertical_centered(|ui| {
                         if self.balls.is_empty() {
                             ui.label(
-                                egui::RichText::new("No balls found in the /balls/ directory.")
+                                egui::RichText::new(t("ball-no-balls-found-in-the-balls"))
                                     .color(egui::Color32::GRAY),
                             );
                         } else {
                             ui.label(
-                                egui::RichText::new("No balls match your search.")
+                                egui::RichText::new(t("ball-no-balls-match-your-search"))
                                     .color(egui::Color32::GRAY),
                             );
                         }
@@ -703,15 +714,15 @@ impl PatcherState {
                 let pages = filtered.len().div_ceil(PAGE_SIZE).max(1);
                 self.page = self.page.min(pages - 1);
                 ui.horizontal(|ui| {
-                    ui.label(format!("Page {} of {}", self.page + 1, pages));
+                    ui.label(t_args("ball-page-page-of-pages", &[("page", (self.page + 1).to_string().into()), ("pages", pages.to_string().into())]));
                     if ui
-                        .add_enabled(self.page > 0, egui::Button::new("Previous"))
+                        .add_enabled(self.page > 0, egui::Button::new(t("ball-previous")))
                         .clicked()
                     {
                         self.page -= 1;
                     }
                     if ui
-                        .add_enabled(self.page + 1 < pages, egui::Button::new("Next"))
+                        .add_enabled(self.page + 1 < pages, egui::Button::new(t("ball-next")))
                         .clicked()
                     {
                         self.page += 1;
@@ -737,7 +748,7 @@ impl PatcherState {
                                                 .fit_to_exact_size(size),
                                             );
                                         } else {
-                                            ui.add_sized(size, egui::Label::new("No Image"));
+                                            ui.add_sized(size, egui::Label::new(t("ball-no-image")));
                                         }
                                         ui.strong(&ball.name);
                                         ui.add_space(5.0);
@@ -752,7 +763,7 @@ impl PatcherState {
                                             if ui
                                                 .add_enabled(
                                                     !busy,
-                                                    egui::Button::new("Restore").min_size(
+                                                    egui::Button::new(t("app-restore")).min_size(
                                                         egui::vec2(ui.available_width(), 24.0),
                                                     ),
                                                 )
@@ -769,7 +780,7 @@ impl PatcherState {
                                         } else if ui
                                             .add_enabled(
                                                 !busy,
-                                                egui::Button::new("Apply").min_size(egui::vec2(
+                                                egui::Button::new(t("ball-apply")).min_size(egui::vec2(
                                                     ui.available_width(),
                                                     24.0,
                                                 )),
@@ -788,7 +799,7 @@ impl PatcherState {
                                         if ui
                                             .add_enabled(
                                                 !busy,
-                                                egui::Button::new("Delete")
+                                                egui::Button::new(t("presets-delete"))
                                                     .fill(egui::Color32::from_rgb(180, 50, 50))
                                                     .min_size(egui::vec2(
                                                         ui.available_width(),

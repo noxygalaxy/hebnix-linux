@@ -118,7 +118,9 @@ pub fn find_heroic_shortcuts() -> Vec<ShortcutCandidate> {
 
     let mut candidates = Vec::new();
     for (_, entry) in shortcuts {
-        let VdfValue::Map(fields) = entry else { continue };
+        let VdfValue::Map(fields) = entry else {
+            continue;
+        };
         let mut app_name = None;
         let mut exe = None;
         for (key, value) in &fields {
@@ -149,7 +151,9 @@ fn launch_uri(uri: &str) -> Result<(), String> {
     if uri.starts_with("steam://") {
         match std::process::Command::new("steam").arg(uri).spawn() {
             Ok(_) => return Ok(()),
-            Err(error) => tracing::warn!("rl_launch: 'steam' binary spawn failed ({error}), falling back to xdg-open"),
+            Err(error) => tracing::warn!(
+                "rl_launch: 'steam' binary spawn failed ({error}), falling back to xdg-open"
+            ),
         }
     }
     std::process::Command::new("xdg-open")
@@ -203,10 +207,14 @@ pub fn resolve_install_root(cfg: &RlLaunchCfg) -> Option<PathBuf> {
     match cfg.mode {
         RlLaunchMode::Unconfigured => None,
         RlLaunchMode::HeroicDirect | RlLaunchMode::SteamShortcutToHeroic => {
-            let path = dirs::home_dir()?.join(".config/heroic/legendaryConfig/legendary/installed.json");
+            let path =
+                dirs::home_dir()?.join(".config/heroic/legendaryConfig/legendary/installed.json");
             let text = std::fs::read_to_string(path).ok()?;
             let json: serde_json::Value = serde_json::from_str(&text).ok()?;
-            let install_path = json.get(&cfg.heroic_app_name)?.get("install_path")?.as_str()?;
+            let install_path = json
+                .get(&cfg.heroic_app_name)?
+                .get("install_path")?
+                .as_str()?;
             Some(PathBuf::from(install_path))
         }
         RlLaunchMode::SteamProton => {
@@ -254,7 +262,10 @@ pub fn restart(cfg: &RlLaunchCfg) -> Result<(), String> {
 /// `{multihome_encoded}` placeholders, shell-word-split) overrides
 /// everything below without needing to re-run the setup wizard.
 pub fn restart_multihome(cfg: &RlLaunchCfg, address: &str) -> Result<(), String> {
-    tracing::info!("rl_launch: restart_multihome() mode={:?} address={address}", cfg.mode);
+    tracing::info!(
+        "rl_launch: restart_multihome() mode={:?} address={address}",
+        cfg.mode
+    );
     let raw = format!("-multihome={address}");
     let encoded = format!("-multihome%3D{address}");
 

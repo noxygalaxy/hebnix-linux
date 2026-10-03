@@ -9,6 +9,9 @@ mod boost_patcher {
 mod colours {
     pub use crate::patcher::colours::*;
 }
+mod car_patcher {
+    pub use crate::patcher::car_patcher::*;
+}
 mod config;
 mod rl_launch;
 mod cosmetic_thumbnail {
@@ -24,13 +27,14 @@ mod deep_link;
 mod discord_presence;
 mod dpi_fix;
 mod hotkey;
+mod i18n;
 #[path = "item_spawning/mod.rs"]
 mod item_spawning;
-mod veryimportantfile;
 mod messages;
 mod monitor;
 mod multiplayer_lan;
 mod overlay;
+mod veryimportantfile;
 mod patch_core {
     pub use crate::patcher::patch_core::*;
 }
@@ -38,6 +42,9 @@ mod plugins;
 mod presets;
 mod spoofer;
 mod statsapi_ini;
+mod speed_patch {
+    pub use crate::patcher::speed_patch::*;
+}
 mod swapper {
     pub use crate::patcher::swapper::*;
 }
@@ -193,6 +200,7 @@ fn main() -> eframe::Result {
     multiplayer_lan::raise_net_admin_ambient();
 
     let cfg = config::Config::load(&base_dir);
+    i18n::init(&cfg.settings.language, Some(base_dir.join("locales")));
 
     // single instance guard
     let Some(_lock) = winutil::acquire_single_instance() else {

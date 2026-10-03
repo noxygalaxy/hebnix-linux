@@ -34,7 +34,9 @@ pub fn has_live_handoff() -> bool {
 }
 
 pub fn finish_live_handoff() {
-    let Some(spoofer) = LIVE_SPOOFER.get() else { return };
+    let Some(spoofer) = LIVE_SPOOFER.get() else {
+        return;
+    };
     tracing::info!("Hebnix UI closed; proxy watchdog remains active until Rocket League exits");
     while hebnix_sdk::process::is_rocket_league_running() {
         std::thread::sleep(std::time::Duration::from_secs(1));
@@ -98,10 +100,8 @@ pub fn run(parent_pid: u32) {
     }
     if crate::spoofer::hosts::has_redirects() {
         let base_dir = crate::config::base_dir();
-        let _ = crate::spoofer::run_privileged(
-            crate::spoofer::PrivilegedAction::ClearHosts,
-            &base_dir,
-        );
+        let _ =
+            crate::spoofer::run_privileged(crate::spoofer::PrivilegedAction::ClearHosts, &base_dir);
         // only flush if we actually just cleared something - resolvectl
         // flush-caches needs its own separate polkit authorization on some
         // setups, so calling it unconditionally at the end of every run()

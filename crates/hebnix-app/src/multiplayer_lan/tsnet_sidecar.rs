@@ -25,6 +25,10 @@ use crate::messages::AppMsg;
 
 /// our own TUN device, never the user's `tailscale0`
 pub const TUN_NAME: &str = "hebnixts0";
+/// tailscaled knob that turns off direct (udp) connections, so all traffic
+/// goes through tailscale's DERP relays and other players never learn this
+/// machine's public address. costs some ping. read when tailscaled starts.
+const RELAY_ONLY_KNOB: &str = "TS_DEBUG_ALWAYS_USE_DERP";
 const DAEMON_START_TIMEOUT: Duration = Duration::from_secs(15);
 const PEER_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -116,8 +120,9 @@ impl std::fmt::Debug for TsnetSidecarHandle {
 impl TsnetSidecarHandle {
     /// Starts Hebnix's own `tailscaled` (stopping one a crashed earlier
     /// session left behind) and a background peer-status poller. Needs
-    /// CAP_NET_ADMIN on the Hebnix binary, see caps.rs.
-    pub fn spawn(state_dir: &Path, tx: Sender<AppMsg>) -> Result<Self, String> {
+    /// CAP_NET_ADMIN on the Hebnix binary, see caps.rs. `relay_only` forces
+    /// all traffic through DERP relays (the "Hide my IP" setting).
+    pub fn spawn(state_dir: &Path, relay_only: bool, tx: Sender<AppMsg>) -> Result<Self, String> {
         let tailscaled = find_binary("tailscaled")?;
         let tailscale_cli = find_binary("tailscale")?;
         std::fs::create_dir_all(state_dir).map_err(|error| {
@@ -140,7 +145,13 @@ impl TsnetSidecarHandle {
         let log = std::fs::File::create(&log_path)
             .map_err(|error| format!("could not create {}: {error}", log_path.display()))?;
         let log_err = log.try_clone().map_err(|error| error.to_string())?;
-        let child = super::caps::command_with_net_caps(&tailscaled)
+        let mut command = super::caps::command_with_net_caps(&tailscaled);
+        if relay_only {
+            command.env(RELAY_ONLY_KNOB, "true");
+        } else {
+            command.env_remove(RELAY_ONLY_KNOB);
+        }
+        let child = command
             .arg(format!("--tun={TUN_NAME}"))
             .arg(format!("--socket={}", socket.display()))
             .arg(format!("--statedir={}", state_dir.display()))
@@ -202,7 +213,12 @@ impl TsnetSidecarHandle {
         ))
     }
 
-    pub fn request_up(&self, auth_key: String, hostname: String, control_url: String) -> Result<(), String> {
+    pub fn request_up(
+        &self,
+        auth_key: String,
+        hostname: String,
+        control_url: String,
+    ) -> Result<(), String> {
         let cli = self.cli();
         let tx = self.tx.clone();
         std::thread::spawn(move || {
@@ -254,10 +270,13 @@ impl TsnetSidecarHandle {
     pub fn wait_for_exit(&mut self, timeout: Duration) -> bool {
         let start = std::time::Instant::now();
         while start.elapsed() < timeout {
-            let done = self.daemon.lock().map_or(true, |mut daemon| match daemon.as_mut() {
-                Some(child) => child.try_wait().ok().flatten().is_some(),
-                None => true,
-            });
+            let done = self
+                .daemon
+                .lock()
+                .map_or(true, |mut daemon| match daemon.as_mut() {
+                    Some(child) => child.try_wait().ok().flatten().is_some(),
+                    None => true,
+                });
             if done {
                 return true;
             }
@@ -320,7 +339,7 @@ impl Cli {
             Err(if message.is_empty() {
                 format!("tailscale exited with an error ({:?})", output.status)
             } else {
-                message.to_string()
+                redact(message)
             })
         }
     }
@@ -355,12 +374,20 @@ fn peer_ipv4(allowed_ips: &[String], tailscale_ips: Vec<String>) -> Option<Strin
         .iter()
         .find_map(|route| {
             let address = route.split('/').next().unwrap_or(route);
-            address.parse::<std::net::Ipv4Addr>().is_ok().then(|| address.to_string())
+            address
+                .parse::<std::net::Ipv4Addr>()
+                .is_ok()
+                .then(|| address.to_string())
         })
         .or_else(|| pick_ipv4(tailscale_ips))
 }
 
-fn bring_up(cli: &Cli, auth_key: &str, hostname: &str, control_url: &str) -> Result<String, String> {
+fn bring_up(
+    cli: &Cli,
+    auth_key: &str,
+    hostname: &str,
+    control_url: &str,
+) -> Result<String, String> {
     cli.run(&[
         "up",
         &format!("--login-server={control_url}"),
@@ -377,13 +404,15 @@ fn bring_up(cli: &Cli, auth_key: &str, hostname: &str, control_url: &str) -> Res
         "--timeout=30s",
     ])?;
     let status = fetch_status(cli)?;
-    pick_ipv4(status.tailscale_ips)
-        .ok_or_else(|| "connected, but the multiplayer network did not assign an address".to_string())
+    pick_ipv4(status.tailscale_ips).ok_or_else(|| {
+        "connected, but the multiplayer network did not assign an address".to_string()
+    })
 }
 
 fn fetch_status(cli: &Cli) -> Result<RawStatus, String> {
     let raw = cli.run(&["status", "--json"])?;
-    serde_json::from_str(&raw).map_err(|error| format!("could not understand the multiplayer network's status: {error}"))
+    serde_json::from_str(&raw)
+        .map_err(|error| format!("could not understand the multiplayer network's status: {error}"))
 }
 
 fn spawn_peer_poller(cli: Cli, tx: Sender<AppMsg>, stop: Arc<AtomicBool>) {
@@ -431,7 +460,10 @@ fn socket_path(state_dir: &Path) -> PathBuf {
 /// tailscale package), next to the Hebnix binary, or PATH
 fn find_binary(name: &str) -> Result<PathBuf, String> {
     let mut dirs = vec![crate::config::base_dir().join("tailscale-bin")];
-    if let Some(exe_dir) = std::env::current_exe().ok().and_then(|exe| exe.parent().map(Path::to_path_buf)) {
+    if let Some(exe_dir) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+    {
         dirs.push(exe_dir);
     }
     if let Some(path) = std::env::var_os("PATH") {
@@ -489,14 +521,77 @@ pub(super) fn stop_stale_daemon(pid_file: &Path) {
 /// table 52, so they can step on each other's routes.
 fn foreign_tailscaled() -> Option<u32> {
     let ours = format!("--tun={TUN_NAME}");
-    std::fs::read_dir("/proc").ok()?.flatten().find_map(|entry| {
-        let pid: u32 = entry.file_name().to_str()?.parse().ok()?;
-        if process_name(pid).as_deref() != Some("tailscaled") {
-            return None;
+    std::fs::read_dir("/proc")
+        .ok()?
+        .flatten()
+        .find_map(|entry| {
+            let pid: u32 = entry.file_name().to_str()?.parse().ok()?;
+            if process_name(pid).as_deref() != Some("tailscaled") {
+                return None;
+            }
+            let cmdline = std::fs::read(entry.path().join("cmdline")).unwrap_or_default();
+            (!String::from_utf8_lossy(&cmdline).contains(&ours)).then_some(pid)
+        })
+}
+
+/// hides auth keys and ip addresses in text that ends up on screen, like
+/// tailscale's own error messages (which echo the whole `up` command back)
+pub fn redact(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut word = String::new();
+    for c in text.chars() {
+        if c.is_whitespace() {
+            out.push_str(&redact_word(&word));
+            word.clear();
+            out.push(c);
+        } else {
+            word.push(c);
         }
-        let cmdline = std::fs::read(entry.path().join("cmdline")).unwrap_or_default();
-        (!String::from_utf8_lossy(&cmdline).contains(&ours)).then_some(pid)
-    })
+    }
+    out.push_str(&redact_word(&word));
+    out
+}
+
+fn redact_word(word: &str) -> String {
+    for flag in ["--auth-key=", "--authkey="] {
+        if word.starts_with(flag) {
+            return format!("{flag}<hidden>");
+        }
+    }
+    for key in ["hskey-", "tskey-"] {
+        if let Some(at) = word.find(key) {
+            return format!("{}<hidden>", &word[..at]);
+        }
+    }
+    mask_ipv4(word)
+}
+
+/// swaps anything shaped like an ipv4 address for x.x.x.x
+fn mask_ipv4(word: &str) -> String {
+    let mut out = String::with_capacity(word.len());
+    let mut run = String::new();
+    let flush = |run: &mut String, out: &mut String| {
+        if run.trim_matches('.').parse::<std::net::Ipv4Addr>().is_ok() {
+            let lead = run.len() - run.trim_start_matches('.').len();
+            let tail = run.len() - run.trim_end_matches('.').len();
+            out.push_str(&".".repeat(lead));
+            out.push_str("x.x.x.x");
+            out.push_str(&".".repeat(tail));
+        } else {
+            out.push_str(run);
+        }
+        run.clear();
+    };
+    for c in word.chars() {
+        if c.is_ascii_digit() || c == '.' {
+            run.push(c);
+        } else {
+            flush(&mut run, &mut out);
+            out.push(c);
+        }
+    }
+    flush(&mut run, &mut out);
+    out
 }
 
 fn log_tail(path: &Path) -> String {
@@ -518,6 +613,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn redact_hides_keys_and_addresses() {
+        let text = "Error: changing settings\n\n\ttailscale up --accept-dns=false \
+                    --auth-key=hskey-auth-abc123 --hostname=hebnix-3cd2be97 \
+                    --login-server=https://hs.example.com --timeout=30s\n\
+                    peer 10.242.77.3:41641 and 203.0.113.5 via v1.2.3";
+        let out = redact(text);
+        assert!(!out.contains("hskey"), "{out}");
+        assert!(out.contains("--auth-key=<hidden>"), "{out}");
+        assert!(!out.contains("10.242.77.3"), "{out}");
+        assert!(!out.contains("203.0.113.5"), "{out}");
+        assert!(out.contains("x.x.x.x:41641"), "{out}");
+        // non-addresses and layout survive
+        assert!(out.contains("v1.2.3"), "{out}");
+        assert!(out.contains("--timeout=30s"), "{out}");
+        assert!(out.contains("\n\n\t"), "{out}");
+        assert_eq!(redact("key tskey-abc, ok"), "key <hidden> ok");
+    }
+
+
+    #[test]
     fn status_json_with_null_peer_and_ips_parses() {
         let json = r#"{"BackendState":"Running","TailscaleIPs":null,"Peer":null}"#;
         let status: RawStatus = serde_json::from_str(json).unwrap();
@@ -528,7 +643,10 @@ mod tests {
 
     #[test]
     fn a_peers_v4_address_comes_from_allowed_ips() {
-        let allowed = vec!["fd7a:115c:a1e0::2/128".to_string(), "10.242.77.2/32".to_string()];
+        let allowed = vec![
+            "fd7a:115c:a1e0::2/128".to_string(),
+            "10.242.77.2/32".to_string(),
+        ];
         let ips = vec!["fd7a:115c:a1e0::2".to_string()];
         assert_eq!(peer_ipv4(&allowed, ips).as_deref(), Some("10.242.77.2"));
     }

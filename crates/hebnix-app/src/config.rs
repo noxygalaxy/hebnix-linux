@@ -57,6 +57,10 @@ impl Default for WindowCfg {
 pub struct SettingsCfg {
     pub hotkey: String,
     pub theme: String,
+    /// UI language code ("en", "de", ...) or "auto" to follow the system
+    pub language: String,
+    /// Main tab selected when Hebnix starts.
+    pub default_tab: String,
     /// main window bg opacity (0.5-1.0)
     pub window_opacity: f32,
     pub start_in_tray: bool,
@@ -80,6 +84,8 @@ pub struct SettingsCfg {
     pub discord_show_map: bool,
     pub discord_show_gamemode: bool,
     pub discord_custom_message: String,
+    /// let other Workshop multiplayer players download maps from this PC
+    pub p2p_file_sharing: bool,
 }
 
 impl Default for SettingsCfg {
@@ -87,6 +93,8 @@ impl Default for SettingsCfg {
         Self {
             hotkey: "f2".to_string(),
             theme: "Dark".to_string(),
+            language: crate::i18n::AUTO.to_string(),
+            default_tab: "Console".to_string(),
             window_opacity: 0.96,
             start_in_tray: false,
             minimize_to_tray: false,
@@ -102,6 +110,7 @@ impl Default for SettingsCfg {
             discord_show_map: true,
             discord_show_gamemode: true,
             discord_custom_message: "Playing Rocket League".to_string(),
+            p2p_file_sharing: true,
         }
     }
 }
@@ -168,6 +177,14 @@ pub enum PatchSource {
     Custom,
 }
 
+/// experimental animation speed patch, see patcher/speed_patch.rs
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SpeedPatchCfg {
+    /// show a speed picker on the Items page decal and swap rows
+    pub items_page: bool,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PatcherCfg {
@@ -175,9 +192,137 @@ pub struct PatcherCfg {
     pub active_ball: Option<String>,
     pub active_boost: Option<String>,
     pub active_decals: std::collections::HashMap<String, String>,
+    pub active_cars: std::collections::HashMap<String, String>,
     pub ball_source: PatchSource,
     pub boost_source: PatchSource,
     pub decal_source: PatchSource,
+    pub car_source: PatchSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionButtonAction {
+    StartRocketLeague,
+    RestartRocketLeague,
+    CloseRocketLeague,
+    OpenHebnixFolder,
+    OpenPluginsFolder,
+    ReloadPlugins,
+    FixEpicConnection,
+}
+
+impl ActionButtonAction {
+    // linux-port: no FixEpicConnection, it repairs Windows' Epic launcher
+    pub const CLOSED: [Self; 4] = [
+        Self::StartRocketLeague,
+        Self::OpenHebnixFolder,
+        Self::OpenPluginsFolder,
+        Self::ReloadPlugins,
+    ];
+
+    pub const OPEN: [Self; 5] = [
+        Self::RestartRocketLeague,
+        Self::CloseRocketLeague,
+        Self::OpenHebnixFolder,
+        Self::OpenPluginsFolder,
+        Self::ReloadPlugins,
+    ];
+
+    pub fn label(self) -> String {
+        use crate::i18n::t;
+        match self {
+            Self::StartRocketLeague => t("action-start-rocket-league"),
+            Self::RestartRocketLeague => t("action-restart-rocket-league"),
+            Self::CloseRocketLeague => t("action-close-rocket-league"),
+            Self::OpenHebnixFolder => t("action-open-hebnix-folder"),
+            Self::OpenPluginsFolder => t("action-open-plugins-folder"),
+            Self::ReloadPlugins => t("action-reload-plugins"),
+            Self::FixEpicConnection => t("action-fix-epic-connection"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActionButtonEntry {
+    pub action: ActionButtonAction,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ActionButtonCfg {
+    pub rocket_league_closed: Vec<ActionButtonEntry>,
+    pub rocket_league_open: Vec<ActionButtonEntry>,
+}
+
+impl Default for ActionButtonCfg {
+    fn default() -> Self {
+        Self {
+            rocket_league_closed: ActionButtonAction::CLOSED
+                .into_iter()
+                .map(|action| ActionButtonEntry {
+                    enabled: action == ActionButtonAction::StartRocketLeague,
+                    action,
+                })
+                .collect(),
+            rocket_league_open: ActionButtonAction::OPEN
+                .into_iter()
+                .map(|action| ActionButtonEntry {
+                    enabled: action == ActionButtonAction::RestartRocketLeague,
+                    action,
+                })
+                .collect(),
+        }
+    }
+}
+
+impl ActionButtonCfg {
+    fn normalize(&mut self) {
+        normalize_action_entries(
+            &mut self.rocket_league_closed,
+            &ActionButtonAction::CLOSED,
+            ActionButtonAction::StartRocketLeague,
+        );
+        normalize_action_entries(
+            &mut self.rocket_league_open,
+            &ActionButtonAction::OPEN,
+            ActionButtonAction::RestartRocketLeague,
+        );
+    }
+}
+
+fn normalize_action_entries(
+    entries: &mut Vec<ActionButtonEntry>,
+    allowed: &[ActionButtonAction],
+    default_action: ActionButtonAction,
+) {
+    let mut normalized = Vec::with_capacity(allowed.len());
+    for entry in entries.drain(..) {
+        if allowed.contains(&entry.action)
+            && !normalized
+                .iter()
+                .any(|existing: &ActionButtonEntry| existing.action == entry.action)
+        {
+            normalized.push(entry);
+        }
+    }
+    for &action in allowed {
+        if !normalized.iter().any(|entry| entry.action == action) {
+            normalized.push(ActionButtonEntry {
+                action,
+                enabled: false,
+            });
+        }
+    }
+    if !normalized.iter().any(|entry| entry.enabled) {
+        if let Some(entry) = normalized
+            .iter_mut()
+            .find(|entry| entry.action == default_action)
+        {
+            entry.enabled = true;
+        }
+    }
+    *entries = normalized;
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -187,6 +332,8 @@ pub struct Config {
     pub settings: SettingsCfg,
     pub rl_launch: RlLaunchCfg,
     pub patcher: PatcherCfg,
+    pub speed_patch: SpeedPatchCfg,
+    pub action_button: ActionButtonCfg,
     /// enabled state keyed by plugin slug
     pub plugins: BTreeMap<String, bool>,
 }
@@ -197,7 +344,10 @@ impl Config {
         let toml_path = base_dir.join("config.toml");
         if let Ok(text) = std::fs::read_to_string(&toml_path) {
             match toml::from_str::<Config>(&text) {
-                Ok(cfg) => return cfg,
+                Ok(mut cfg) => {
+                    cfg.action_button.normalize();
+                    return cfg;
+                }
                 Err(e) => tracing::warn!("config.toml is invalid ({e}); using defaults"),
             }
         }
@@ -384,7 +534,81 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{PatchSource, PatcherCfg};
+    use super::{ActionButtonAction, ActionButtonCfg, ActionButtonEntry, PatchSource, PatcherCfg};
+
+    #[test]
+    fn action_button_defaults_to_start_and_restart() {
+        let config = ActionButtonCfg::default();
+
+        let closed: Vec<_> = config
+            .rocket_league_closed
+            .iter()
+            .filter(|entry| entry.enabled)
+            .map(|entry| entry.action)
+            .collect();
+        let open: Vec<_> = config
+            .rocket_league_open
+            .iter()
+            .filter(|entry| entry.enabled)
+            .map(|entry| entry.action)
+            .collect();
+
+        assert_eq!(closed, vec![ActionButtonAction::StartRocketLeague]);
+        assert_eq!(open, vec![ActionButtonAction::RestartRocketLeague]);
+    }
+
+    #[test]
+    fn action_button_normalization_restores_complete_valid_lists() {
+        let mut config = ActionButtonCfg {
+            rocket_league_closed: vec![
+                ActionButtonEntry {
+                    action: ActionButtonAction::OpenPluginsFolder,
+                    enabled: false,
+                },
+                ActionButtonEntry {
+                    action: ActionButtonAction::OpenPluginsFolder,
+                    enabled: true,
+                },
+                ActionButtonEntry {
+                    action: ActionButtonAction::CloseRocketLeague,
+                    enabled: true,
+                },
+            ],
+            rocket_league_open: Vec::new(),
+        };
+
+        config.normalize();
+
+        assert_eq!(
+            config.rocket_league_closed.len(),
+            ActionButtonAction::CLOSED.len()
+        );
+        assert_eq!(
+            config.rocket_league_closed[0].action,
+            ActionButtonAction::OpenPluginsFolder
+        );
+        assert!(!config.rocket_league_closed[0].enabled);
+        assert!(
+            !config
+                .rocket_league_closed
+                .iter()
+                .any(|entry| entry.action == ActionButtonAction::CloseRocketLeague)
+        );
+        assert_eq!(config.rocket_league_open.len(), 5);
+        assert!(
+            !config
+                .rocket_league_open
+                .iter()
+                .any(|entry| entry.action == ActionButtonAction::FixEpicConnection)
+        );
+        assert!(
+            config
+                .rocket_league_open
+                .iter()
+                .find(|entry| entry.action == ActionButtonAction::RestartRocketLeague)
+                .is_some_and(|entry| entry.enabled)
+        );
+    }
 
     #[test]
     fn older_patcher_config_defaults_sources_to_catalog() {
@@ -393,6 +617,7 @@ mod tests {
         assert_eq!(config.ball_source, PatchSource::Catalog);
         assert_eq!(config.boost_source, PatchSource::Catalog);
         assert_eq!(config.decal_source, PatchSource::Catalog);
+        assert_eq!(config.car_source, PatchSource::Catalog);
     }
 
     #[test]
@@ -401,6 +626,7 @@ mod tests {
             ball_source: PatchSource::Custom,
             boost_source: PatchSource::Catalog,
             decal_source: PatchSource::Custom,
+            car_source: PatchSource::Custom,
             ..PatcherCfg::default()
         };
 
@@ -410,5 +636,6 @@ mod tests {
         assert_eq!(decoded.ball_source, PatchSource::Custom);
         assert_eq!(decoded.boost_source, PatchSource::Catalog);
         assert_eq!(decoded.decal_source, PatchSource::Custom);
+        assert_eq!(decoded.car_source, PatchSource::Custom);
     }
 }

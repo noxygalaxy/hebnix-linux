@@ -2,9 +2,19 @@ use hebnix_sdk::save_file::WindowMode;
 use hebnix_sdk::stats::StatsEvent;
 use serde_json::Value;
 
+pub fn block_item_action_if_game_running(tx: &crossbeam_channel::Sender<AppMsg>) -> bool {
+    if hebnix_sdk::process::is_rocket_league_running() {
+        let _ = tx.send(AppMsg::ItemActionBlocked);
+        true
+    } else {
+        false
+    }
+}
+
 #[derive(Debug)]
 pub enum AppMsg {
     Log(String),
+    ItemActionBlocked,
     ReloadCatalogs,
     CatalogsFetched {
         result: Result<std::collections::HashMap<String, Value>, String>,

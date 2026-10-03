@@ -29,7 +29,7 @@ pub use firewall::{
 // session type
 pub use hosting::HostSession;
 pub use map_sync::{
-    LocalInfo, MAP_SYNC_PORT, MAX_MAP_BYTES, MapFileProvider, MapProvider, SlotMap,
+    LocalInfo, MAP_SYNC_PORT, MAX_MAP_BYTES, MapFileProvider, MapProvider, PeerOffer, SlotMap,
     TransferProgress, fetch_map_file, hash_file, is_local_map_id, local_map_id, valid_map_id,
 };
 pub use models::{
@@ -37,7 +37,7 @@ pub use models::{
     RoomCredentials, TsnetAuthKey, UpdatePlayerRequest,
 };
 pub use room_api::RoomClient;
-pub use tsnet_sidecar::{PeerInfo, TsState, TsnetSidecarHandle};
+pub use tsnet_sidecar::{PeerInfo, TsState, TsnetSidecarHandle, redact};
 pub use caps::{
     GRANTED_CAPS, grant_via_pkexec, has_multiplayer_capabilities,
     has_net_bind_service_capability, raise_net_admin_ambient,

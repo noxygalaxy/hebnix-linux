@@ -39,7 +39,10 @@ pub fn ensure_map_sync_rule(executable: &Path) -> Result<(), String> {
     ensure_table()?;
     ensure_rule(
         "hebnix-workshop-map-sync",
-        &format!("ip saddr {TAILNET_SUBNET} tcp dport {}", super::MAP_SYNC_PORT),
+        &format!(
+            "ip saddr {TAILNET_SUBNET} tcp dport {}",
+            super::MAP_SYNC_PORT
+        ),
         executable,
     )
 }
@@ -56,7 +59,9 @@ pub fn ensure_rocket_league_lan_rule(executable: &Path, remote: &str) -> Result<
 
 pub fn remove_rules() -> Result<(), String> {
     // dropping the whole table removes every rule we ever added in one shot
-    let _ = super::caps::command_with_net_admin("nft").args(["delete", "table", "inet", "hebnix"]).output();
+    let _ = super::caps::command_with_net_admin("nft")
+        .args(["delete", "table", "inet", "hebnix"])
+        .output();
     Ok(())
 }
 

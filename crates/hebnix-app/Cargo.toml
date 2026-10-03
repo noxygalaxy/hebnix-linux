@@ -55,6 +55,9 @@ gamepads = "0.1"
 rodio = "0.17"
 tungstenite = { version = "0.21", features = ["native-tls"] }
 p256 = { version = "0.13", default-features = false, features = ["ecdsa", "pkcs8", "std"] }
+fluent-bundle = "0.16.0"
+unic-langid = "0.9.6"
+sys-locale = "0.3.2"
 
 # --- linux port additions ---
 sysinfo = "0.38.4"
@@ -86,3 +89,6 @@ gtk-layer-shell = { version = "0.8.2", features = ["v0_6"] }
 url = "2.5.8"
 webkit2gtk = { version = "2.0.2", features = ["v2_40"] }
 javascriptcore-rs = "1.1.2"
+
+[dev-dependencies]
+fluent-syntax = "0.12.0"

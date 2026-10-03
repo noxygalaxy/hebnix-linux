@@ -1,6 +1,7 @@
+use crate::i18n::{t, t_args};
 use crate::messages::AppMsg;
 use crate::patcher::painted_swap::{self, SwapPaint};
-use crossbeam_channel::{unbounded, Receiver, Sender};
+use crossbeam_channel::{Receiver, Sender, unbounded};
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -43,21 +44,21 @@ impl SwapCategory {
         Self::Wheels,
     ];
 
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> String {
         match self {
-            Self::Antennas => "Antennas",
-            Self::Anthems => "Anthems",
-            Self::Borders => "Borders",
-            Self::Bodies => "Bodies",
-            Self::Boosts => "Boosts",
-            Self::Engines => "Engines",
-            Self::Goals => "Goals",
-            Self::Finishes => "Finishes",
-            Self::Banners => "Banners",
-            Self::Skins => "Decals",
-            Self::Toppers => "Toppers",
-            Self::Trails => "Trails",
-            Self::Wheels => "Wheels",
+            Self::Antennas => t("label-antennas"),
+            Self::Anthems => t("label-anthems"),
+            Self::Borders => t("label-borders"),
+            Self::Bodies => t("label-bodies"),
+            Self::Boosts => t("label-boosts"),
+            Self::Engines => t("label-engines"),
+            Self::Goals => t("label-goals"),
+            Self::Finishes => t("label-finishes"),
+            Self::Banners => t("label-banners"),
+            Self::Skins => t("label-decals"),
+            Self::Toppers => t("label-toppers"),
+            Self::Trails => t("label-trails"),
+            Self::Wheels => t("label-wheels"),
         }
     }
 
@@ -154,18 +155,10 @@ fn inferred_thumbnail(category: SwapCategory, item: &SwapItem, cooked_pc: &Path)
     None
 }
 
-fn source_upks_available(category: SwapCategory, item: &SwapItem, cooked_pc: &Path) -> bool {
-    if !cooked_pc.join(&item.upk).is_file() {
-        return false;
-    }
-    if let Some(thumbnail) = item.thumbnail.as_deref().filter(|name| !name.is_empty()) {
-        return cooked_pc.join(thumbnail).is_file();
-    }
-    // Boosts derive their thumbnail UPK name from the cosmetic package.
-    // Without that file, the card can only show the generic placeholder.
-    category != SwapCategory::Boosts || inferred_thumbnail(category, item, cooked_pc).is_some()
+// Preview availability must never determine whether an installed item is listed.
+fn source_upks_available(_category: SwapCategory, item: &SwapItem, cooked_pc: &Path) -> bool {
+    cooked_pc.join(&item.upk).is_file()
 }
-
 fn explosion_thumbnail_asset(item: &SwapItem) -> Option<String> {
     let object = item.path.as_deref()?.split('.').next_back()?;
     (!object.is_empty()).then(|| {
@@ -253,17 +246,25 @@ pub struct SwapperState {
     view_patched: bool,
     owned_only: bool,
     thumbnails: HashMap<String, Option<Arc<[u8]>>>,
-    failed_thumbnails: HashSet<String>,
+    failed_thumbnails: HashMap<String, String>,
     thumbnail_jobs: Sender<(String, PathBuf, String, egui::Context)>,
     thumbnail_results: Receiver<(String, Result<Arc<[u8]>, String>)>,
     resolution_jobs: Sender<(SwapCategory, PathBuf, Vec<SwapItem>, u64, egui::Context)>,
-    resolution_results: Receiver<(SwapCategory, u64, Vec<ResolvedItem>, Vec<(String, String, Option<i64>)>)>,
+    resolution_results: Receiver<(
+        SwapCategory,
+        u64,
+        Vec<ResolvedItem>,
+        Vec<(String, String, Option<i64>)>,
+    )>,
     resolutions: HashMap<SwapCategory, Resolution>,
     resolution_generation: u64,
     spawn_search: HashMap<SwapCategory, String>,
     spawn_page: HashMap<SwapCategory, usize>,
     spawn_paint: HashMap<(SwapCategory, i64), usize>,
     swap_paint: HashMap<String, SwapPaint>,
+    swap_speed: HashMap<String, f32>,
+    /// set from the Experimental tab; shows the speed picker on swap rows
+    pub speed_enabled: bool,
 }
 
 impl SwapperState {
@@ -272,31 +273,50 @@ impl SwapperState {
         let (results, thumbnail_results) = unbounded();
         std::thread::spawn(move || {
             while let Ok((key, path, category, context)) = jobs.recv() {
-                let result = crate::cosmetic_thumbnail::extract_png(&path, &category).map(Into::into);
+                let result =
+                    crate::cosmetic_thumbnail::extract_png(&path, &category).map(Into::into);
                 let _ = results.send((key, result));
                 context.request_repaint();
             }
         });
-        let (resolution_jobs, resolution_requests) = unbounded::<(SwapCategory, PathBuf, Vec<SwapItem>, u64, egui::Context)>();
+        let (resolution_jobs, resolution_requests) =
+            unbounded::<(SwapCategory, PathBuf, Vec<SwapItem>, u64, egui::Context)>();
         let (resolution_sender, resolution_results) = unbounded();
         std::thread::spawn(move || {
-            while let Ok((category, cooked_pc, items, generation, context)) = resolution_requests.recv() {
-                let resolved = items.iter().map(|item| ResolvedItem {
-                    available: source_upks_available(category, item, &cooked_pc),
-                    thumbnail: inferred_thumbnail(category, item, &cooked_pc),
-                }).collect();
+            while let Ok((category, cooked_pc, items, generation, context)) =
+                resolution_requests.recv()
+            {
+                let resolved = items
+                    .iter()
+                    .map(|item| ResolvedItem {
+                        available: source_upks_available(category, item, &cooked_pc),
+                        thumbnail: inferred_thumbnail(category, item, &cooked_pc),
+                    })
+                    .collect();
                 let mut cars = if category == SwapCategory::Skins {
-                    items.iter().filter_map(|item| Some((
-                        item.car_key.clone()?,
-                        item.car_name.clone()?,
-                        item.car_product_id,
-                    ))).collect::<Vec<_>>()
+                    items
+                        .iter()
+                        .filter_map(|item| {
+                            Some((
+                                item.car_key.clone()?,
+                                item.car_name.clone()?,
+                                item.car_product_id,
+                            ))
+                        })
+                        .collect::<Vec<_>>()
                 } else {
                     Vec::new()
                 };
-                cars.sort_by(|left, right| left.1.to_ascii_lowercase().cmp(&right.1.to_ascii_lowercase()));
+                cars.sort_by(|left, right| {
+                    left.1
+                        .to_ascii_lowercase()
+                        .cmp(&right.1.to_ascii_lowercase())
+                });
                 cars.dedup_by(|left, right| left.0 == right.0);
-                if resolution_sender.send((category, generation, resolved, cars)).is_err() {
+                if resolution_sender
+                    .send((category, generation, resolved, cars))
+                    .is_err()
+                {
                     break;
                 }
                 context.request_repaint();
@@ -317,7 +337,7 @@ impl SwapperState {
             view_patched: false,
             owned_only: false,
             thumbnails: HashMap::new(),
-            failed_thumbnails: HashSet::new(),
+            failed_thumbnails: HashMap::new(),
             thumbnail_jobs,
             thumbnail_results,
             resolution_jobs,
@@ -328,31 +348,73 @@ impl SwapperState {
             spawn_page: HashMap::new(),
             spawn_paint: HashMap::new(),
             swap_paint: HashMap::new(),
+            swap_speed: HashMap::new(),
+            speed_enabled: false,
         }
     }
 
     fn collect_thumbnails(&mut self) {
         while let Ok((key, result)) = self.thumbnail_results.try_recv() {
             match result {
-                Ok(png) => { self.thumbnails.insert(key, Some(png)); }
-                Err(_) => {
-                    self.failed_thumbnails.insert(key.clone());
+                Ok(png) => {
+                    self.thumbnails.insert(key, Some(png));
+                }
+                Err(error) => {
+                    self.failed_thumbnails.insert(key.clone(), error);
                     self.thumbnails.insert(key, None);
                 }
             }
         }
     }
 
-    fn queue_thumbnail(&mut self, ui: &egui::Ui, category: SwapCategory, filename: &str, cooked_pc: &Path) {
+    fn thumbnail_status(&mut self, ui: &mut egui::Ui, category: SwapCategory) {
+        let prefix = format!("{}|", category.slug());
+        let failures: Vec<_> = self
+            .failed_thumbnails
+            .keys()
+            .filter(|key| key.starts_with(&prefix))
+            .cloned()
+            .collect();
+        if failures.is_empty() {
+            return;
+        }
+        ui.horizontal(|ui| {
+            ui.weak(t_args("thumbnail-status-failures-previews-unavailable-items-rema", &[("failures", (failures.len()).to_string().into())]));
+            if ui.small_button(t("thumbnail-status-retry-previews")).clicked() {
+                for key in failures { self.failed_thumbnails.remove(&key); self.thumbnails.remove(&key); }
+            }
+        });
+    }
+
+    fn queue_thumbnail(
+        &mut self,
+        ui: &egui::Ui,
+        category: SwapCategory,
+        filename: &str,
+        cooked_pc: &Path,
+    ) {
         let key = format!("{}|{}", category.slug(), filename.to_ascii_lowercase());
         if !self.thumbnails.contains_key(&key) {
             self.thumbnails.insert(key.clone(), None);
-            let _ = self.thumbnail_jobs.send((key, cooked_pc.join(filename), category.slug().to_string(), ui.ctx().clone()));
+            let _ = self.thumbnail_jobs.send((
+                key,
+                cooked_pc.join(filename),
+                category.slug().to_string(),
+                ui.ctx().clone(),
+            ));
         }
     }
 
-    fn resolved_items(&mut self, ui: &mut egui::Ui, category: SwapCategory, cooked_pc: &Path, items: &[SwapItem]) -> Option<Arc<Vec<ResolvedItem>>> {
-        while let Ok((ready_category, generation, resolved, cars)) = self.resolution_results.try_recv() {
+    fn resolved_items(
+        &mut self,
+        ui: &mut egui::Ui,
+        category: SwapCategory,
+        cooked_pc: &Path,
+        items: &[SwapItem],
+    ) -> Option<Arc<Vec<ResolvedItem>>> {
+        while let Ok((ready_category, generation, resolved, cars)) =
+            self.resolution_results.try_recv()
+        {
             if let Some(entry) = self.resolutions.get_mut(&ready_category) {
                 if entry.generation == generation {
                     entry.items = Some(Arc::new(resolved));
@@ -360,20 +422,36 @@ impl SwapperState {
                 }
             }
         }
-        if self.resolutions.get(&category).is_none_or(|entry| entry.path != cooked_pc) {
+        if self
+            .resolutions
+            .get(&category)
+            .is_none_or(|entry| entry.path != cooked_pc)
+        {
             self.resolution_generation += 1;
             let generation = self.resolution_generation;
-            self.resolutions.insert(category, Resolution {
-                path: cooked_pc.to_path_buf(),
+            self.resolutions.insert(
+                category,
+                Resolution {
+                    path: cooked_pc.to_path_buf(),
+                    generation,
+                    items: None,
+                    cars: None,
+                },
+            );
+            let _ = self.resolution_jobs.send((
+                category,
+                cooked_pc.to_path_buf(),
+                items.to_vec(),
                 generation,
-                items: None,
-                cars: None,
-            });
-            let _ = self.resolution_jobs.send((category, cooked_pc.to_path_buf(), items.to_vec(), generation, ui.ctx().clone()));
+                ui.ctx().clone(),
+            ));
         }
-        let resolved = self.resolutions.get(&category).and_then(|entry| entry.items.clone());
+        let resolved = self
+            .resolutions
+            .get(&category)
+            .and_then(|entry| entry.items.clone());
         if resolved.is_none() {
-            ui.weak("Preparing items...");
+            ui.weak(t("resolved-items-preparing-items"));
         }
         resolved
     }
@@ -418,7 +496,10 @@ impl SwapperState {
             let root = catalogs
                 .get(category.slug())
                 .ok_or_else(|| format!("The {} catalog was not downloaded", category.slug()))?;
-            parsed.insert(category, Arc::new(Self::parse_catalog(category, root, bodies)?));
+            parsed.insert(
+                category,
+                Arc::new(Self::parse_catalog(category, root, bodies)?),
+            );
         }
         self.catalogs = parsed;
         self.errors.clear();
@@ -506,8 +587,14 @@ impl SwapperState {
                         serde_json::from_slice::<Value>(&bytes)
                             .map_err(|error| format!("Failed to parse {}: {error}", path.display()))
                     }),
-                None => serde_json::from_str::<Value>(Self::embedded_catalog(category))
-                    .map_err(|error| format!("Failed to parse embedded {} catalog: {error}", category.label())),
+                None => serde_json::from_str::<Value>(Self::embedded_catalog(category)).map_err(
+                    |error| {
+                        format!(
+                            "Failed to parse embedded {} catalog: {error}",
+                            category.label()
+                        )
+                    },
+                ),
             };
             match parsed {
                 Ok(root) => {
@@ -564,7 +651,10 @@ impl SwapperState {
                 id.as_i64()
                     .or_else(|| id.as_str().and_then(|text| text.parse().ok()))
             }),
-            paintable: value.get("paintable").and_then(Value::as_bool).unwrap_or(false),
+            paintable: value
+                .get("paintable")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
             car_key: car.map(|(key, _, _)| key.to_string()),
             car_name: car.map(|(_, name, _)| name.to_string()),
             car_product_id: car.and_then(|(_, _, id)| id),
@@ -599,6 +689,7 @@ impl SwapperState {
         source: &SwapItem,
         target: &SwapItem,
         paint: SwapPaint,
+        speed: f32,
         cooked_pc: &Path,
         backups_dir: &Path,
     ) -> Result<(), String> {
@@ -645,6 +736,13 @@ impl SwapperState {
             paint,
         )
         .map_err(|error| format!("Failed to patch {} for {}: {error}", source.upk, target.upk))?;
+        if crate::speed_patch::is_active(speed) {
+            match crate::speed_patch::apply(&target_live, Some(&target_backup), speed) {
+                Ok(0) => {}
+                Ok(count) => tracing::info!("[Speed] {}: scaled {count} animation values", target.upk),
+                Err(error) => tracing::warn!("[Speed] {}: {error}", target.upk),
+            }
+        }
         let mut target_bnk = None;
         if category == SwapCategory::Boosts {
             if let (Some(source_name), Some(target_name)) =
@@ -901,7 +999,7 @@ impl SwapperState {
         if self.active.is_empty() {
             return;
         }
-        ui.strong("Item swaps");
+        ui.strong(t("active-swaps-item-swaps"));
         ui.add_space(4.0);
         let fallback: Arc<[u8]> = fs::read(self.base_dir.join("assets").join("hebnix.png"))
             .unwrap_or_else(|_| include_bytes!("../../assets/hebnix.png").to_vec())
@@ -928,25 +1026,50 @@ impl SwapperState {
                                 .find(|item| item.upk.eq_ignore_ascii_case(&swap.target_upk))
                         })
                     });
-                    let source_path = source_item
-                        .and_then(|item| item.thumbnail.as_deref())
-                        .map(|filename| cooked_pc.join(filename));
-                    let target_path = target_item
-                        .and_then(|item| item.thumbnail.as_deref())
-                        .map(|filename| {
-                            let backup = backups_dir.join(format!("{filename}.bak"));
-                            if backup.is_file() { backup } else { cooked_pc.join(filename) }
+                    // Prefer the live target thumbnail package: item swapping patches it
+                    // to contain the thumbnail of the item that was swapped in. Fall back
+                    // to the donor's inferred thumbnail for older swap manifests.
+                    let source_path = swap
+                        .target_thumbnail
+                        .as_deref()
+                        .map(|filename| cooked_pc.join(filename))
+                        .filter(|path| path.is_file())
+                        .or_else(|| {
+                            source_item.and_then(|item| {
+                                inferred_thumbnail(category?, item, cooked_pc)
+                                    .map(|filename| cooked_pc.join(filename))
+                            })
                         });
+                    let target_path =
+                        target_item
+                            .and_then(|item| item.thumbnail.as_deref())
+                            .map(|filename| {
+                                let backup = backups_dir.join(format!("{filename}.bak"));
+                                if backup.is_file() {
+                                    backup
+                                } else {
+                                    cooked_pc.join(filename)
+                                }
+                            });
                     let mut image_for = |path: Option<PathBuf>, role: &str| {
-                        let Some(path) = path else { return fallback.clone() };
+                        let Some(path) = path else {
+                            return Some(fallback.clone());
+                        };
                         let key = format!("active|{role}|{}|{}", swap.category, path.display());
                         if !self.thumbnails.contains_key(&key) {
                             self.thumbnails.insert(key.clone(), None);
                             let _ = self.thumbnail_jobs.send((
-                                key.clone(), path, swap.category.clone(), columns[column].ctx().clone(),
+                                key.clone(),
+                                path,
+                                swap.category.clone(),
+                                columns[column].ctx().clone(),
                             ));
                         }
-                        self.thumbnails.get(&key).and_then(Clone::clone).unwrap_or_else(|| fallback.clone())
+                        self.thumbnails.get(&key).and_then(Clone::clone).or_else(|| {
+                            self.failed_thumbnails
+                                .contains_key(&key)
+                                .then(|| fallback.clone())
+                        })
                     };
                     let image = image_for(source_path, "source");
                     let target_image = image_for(target_path, "target");
@@ -958,41 +1081,51 @@ impl SwapperState {
                         .unwrap_or(&swap.target_name);
                     egui::Frame::group(columns[column].style()).show(&mut columns[column], |ui| {
                         ui.vertical_centered(|ui| {
+                            let thumbnail = |ui: &mut egui::Ui,
+                                             uri: String,
+                                             bytes: Option<Arc<[u8]>>,
+                                             size: egui::Vec2| {
+                                if let Some(bytes) = bytes {
+                                    ui.add(egui::Image::from_bytes(uri, bytes).fit_to_exact_size(size));
+                                } else {
+                                    ui.add_sized(size, egui::Spinner::new());
+                                }
+                            };
                             if category == Some(SwapCategory::Skins) {
                                 ui.horizontal(|ui| {
-                                    ui.add(
-                                        egui::Image::from_bytes(
-                                            format!("bytes://active/target/{}", swap.target_upk),
-                                            target_image,
-                                        )
-                                        .fit_to_exact_size(egui::vec2(48.0, 48.0)),
+                                    thumbnail(
+                                        ui,
+                                        format!("bytes://active/target/{}", swap.target_upk),
+                                        target_image,
+                                        egui::vec2(48.0, 48.0),
                                     );
-                                    ui.label("→");
-                                    ui.add(
-                                        egui::Image::from_bytes(
-                                            format!("bytes://active/source/{}", swap.target_upk),
-                                            image,
-                                        )
-                                        .fit_to_exact_size(egui::vec2(48.0, 48.0)),
+                                    ui.label("›");
+                                    thumbnail(
+                                        ui,
+                                        format!("bytes://active/source/{}", swap.target_upk),
+                                        image,
+                                        egui::vec2(48.0, 48.0),
                                     );
                                 });
-                                ui.strong(format!("{target_name} → {source_name} ({})", swap.paint.label()));
-                                ui.weak("Original → replacement");
+                                ui.strong(format!(
+                                    "{target_name} › {source_name} ({})",
+                                    swap.paint.description()
+                                ));
+                                ui.weak(t("active-swaps-original-replacement"));
                             } else {
-                                ui.add(
-                                    egui::Image::from_bytes(
-                                        format!("bytes://active/{}", swap.target_upk),
-                                        image,
-                                    )
-                                    .fit_to_exact_size(egui::vec2(120.0, 76.0)),
+                                thumbnail(
+                                    ui,
+                                    format!("bytes://active/{}", swap.target_upk),
+                                    image,
+                                    egui::vec2(120.0, 76.0),
                                 );
                                 ui.strong(source_name);
-                                ui.weak(format!("Replaced {target_name}"));
+                                ui.weak(t_args("active-swaps-replaced-target-name", &[("target_name", target_name.to_string().into())]));
                             }
                             if ui
                                 .add_sized(
                                     [ui.available_width(), 24.0],
-                                    egui::Button::new("Restore"),
+                                    egui::Button::new(t("app-restore")),
                                 )
                                 .clicked()
                             {
@@ -1031,11 +1164,14 @@ impl SwapperState {
         ui.horizontal(|ui| {
             ui.heading(category.label());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Refresh").clicked() {
-                    self.refresh_catalogs();
+                if ui.button(t("app-reload-catalogs")).clicked() {
+                    let _ = tx.send(AppMsg::ReloadCatalogs);
                     self.load_active(backups_dir);
                 }
-                if ui.button("Restore All").clicked() {
+                if ui.button(t("app-restore-all")).clicked() {
+                    if crate::messages::block_item_action_if_game_running(tx) {
+                        return;
+                    }
                     match self.restore_all(category, cooked_pc, backups_dir) {
                         Ok(count) => {
                             let _ = tx.send(AppMsg::Log(format!(
@@ -1049,7 +1185,7 @@ impl SwapperState {
                     }
                 }
                 if ui
-                    .checkbox(&mut self.view_patched, "Show Applied")
+                    .checkbox(&mut self.view_patched, t("ball-show-applied"))
                     .changed()
                 {
                     self.page.insert(category, 0);
@@ -1058,33 +1194,33 @@ impl SwapperState {
         });
         ui.horizontal(|ui| {
             if ui
-                .checkbox(&mut self.owned_only, "Show only owned replacements")
+                .checkbox(&mut self.owned_only, t("tab-show-only-owned-replacements"))
                 .changed()
             {
                 owned_filter_requested = self.owned_only;
             }
             if self.owned_only {
                 if owned_ids.is_empty() {
-                    ui.weak("Waiting for Rocket League inventory...");
+                    ui.weak(t("tab-waiting-for-rocket-league-inventory"));
                 } else {
-                    ui.weak(format!("{} owned product IDs captured", owned_ids.len()));
+                    ui.weak(t_args("tab-owned-ids-owned-product-ids-captured", &[("owned_ids", (owned_ids.len()).to_string().into())]));
                 }
             }
         });
         ui.horizontal(|ui| {
-            ui.strong("Search:");
+            ui.strong(t("spoofer-search"));
             let input = self.search_input.entry(category).or_default();
             if ui
                 .add(
                     egui::TextEdit::singleline(input)
-                        .hint_text(format!("Search {}...", category.label().to_lowercase()))
+                        .hint_text(t_args("tab-search-category", &[("category", (category.label().to_lowercase()).to_string().into())]))
                         .desired_width(300.0),
                 )
                 .changed()
             {
                 self.page.insert(category, 0);
             }
-            if ui.button("Clear").clicked() {
+            if ui.button(t("spoofer-clear")).clicked() {
                 input.clear();
                 self.page.insert(category, 0);
             }
@@ -1092,6 +1228,7 @@ impl SwapperState {
         ui.separator();
         ui.add_space(10.0);
 
+        self.thumbnail_status(ui, category);
         let Some(items) = self.catalogs.get(&category).cloned() else {
             ui.colored_label(
                 egui::Color32::from_rgb(231, 76, 60),
@@ -1106,7 +1243,11 @@ impl SwapperState {
             return owned_filter_requested;
         };
         if category == SwapCategory::Skins {
-            let cars = self.resolutions.get(&category).and_then(|entry| entry.cars.clone()).unwrap();
+            let cars = self
+                .resolutions
+                .get(&category)
+                .and_then(|entry| entry.cars.clone())
+                .unwrap();
             let car_allowed = |car: &(String, String, Option<i64>)| {
                 !self.owned_only || car.2.is_some_and(|id| owned_ids.contains(&id))
             };
@@ -1124,20 +1265,20 @@ impl SwapperState {
                 .map(|car| car.1.as_str())
                 .unwrap_or("All cars");
             ui.horizontal(|ui| {
-                ui.strong("Car:");
+                ui.strong(t("tab-car"));
                 egui::ComboBox::from_id_salt("swapper_decal_car")
                     .width(280.0)
                     .height(320.0)
                     .selected_text(selected_text)
                     .show_ui(ui, |ui| {
                         ui.horizontal(|ui| {
-                            ui.label("Filter:");
+                            ui.label(t("spoofer-filter"));
                             ui.add(
                                 egui::TextEdit::singleline(&mut self.car_search)
-                                    .hint_text("Search cars...")
+                                    .hint_text(t("tab-search-cars"))
                                     .desired_width(180.0),
                             );
-                            if ui.small_button("Clear").clicked() {
+                            if ui.small_button(t("spoofer-clear")).clicked() {
                                 self.car_search.clear();
                             }
                         });
@@ -1157,8 +1298,8 @@ impl SwapperState {
                         }
                     });
                 if ui
-                    .checkbox(&mut self.match_swapped_item, "Match Selected Car")
-                    .on_hover_text("Limit replacement decals to the selected car")
+                    .checkbox(&mut self.match_swapped_item, t("tab-match-selected-car"))
+                    .on_hover_text(t("tab-limit-replacement-decals-to-the-selected"))
                     .changed()
                 {
                     self.page.insert(category, 0);
@@ -1191,9 +1332,6 @@ impl SwapperState {
                         && swap.source_upk.eq_ignore_ascii_case(&item.upk)
                 });
                 resolved[*index].available
-                    && resolved[*index].thumbnail.as_ref().is_none_or(|filename| {
-                        !self.failed_thumbnails.contains(&format!("{}|{}", category.slug(), filename.to_ascii_lowercase()))
-                    })
                     && matches_search
                     && matches_car
                     && (!self.view_patched || is_applied)
@@ -1203,9 +1341,9 @@ impl SwapperState {
         if filtered.is_empty() {
             ui.vertical_centered(|ui| {
                 ui.weak(if self.view_patched {
-                    "No applied items match the search."
+                    t("tab-no-applied-items-match-the-search")
                 } else {
-                    "No items match the search."
+                    t("tab-no-items-match-the-search")
                 })
             });
             return owned_filter_requested;
@@ -1216,20 +1354,15 @@ impl SwapperState {
         let page = self.page.entry(category).or_insert(0);
         *page = (*page).min(total_pages - 1);
         ui.horizontal(|ui| {
-            ui.label(format!(
-                "Page {} of {}  ({} items)",
-                *page + 1,
-                total_pages,
-                filtered.len()
-            ));
+            ui.label(t_args("tab-page-page-of-total-pages-filtered", &[("page", (*page + 1).to_string().into()), ("total_pages", total_pages.to_string().into()), ("filtered", (filtered.len()).to_string().into())]));
             if ui
-                .add_enabled(*page > 0, egui::Button::new("Previous"))
+                .add_enabled(*page > 0, egui::Button::new(t("ball-previous")))
                 .clicked()
             {
                 *page -= 1;
             }
             if ui
-                .add_enabled(*page + 1 < total_pages, egui::Button::new("Next"))
+                .add_enabled(*page + 1 < total_pages, egui::Button::new(t("ball-next")))
                 .clicked()
             {
                 *page += 1;
@@ -1246,7 +1379,7 @@ impl SwapperState {
                 self.queue_thumbnail(ui, category, &filename, cooked_pc);
             }
         }
-        let mut action: Option<(usize, usize, bool, SwapPaint)> = None;
+        let mut action: Option<(usize, usize, bool, SwapPaint, f32)> = None;
         egui::ScrollArea::vertical()
             .id_salt(("swapper_grid", category))
             .auto_shrink([false, false])
@@ -1257,16 +1390,19 @@ impl SwapperState {
                             let source = &items[source_index];
                             let key =
                                 format!("{}|{}", category.slug(), source.upk.to_ascii_lowercase());
-                            let thumbnail = resolved[source_index].thumbnail.as_deref()
-                                .and_then(|filename| {
-                                    self.thumbnails
-                                        .get(&format!(
-                                            "{}|{}",
-                                            category.slug(),
-                                            filename.to_ascii_lowercase()
-                                        ))
-                                        .and_then(Clone::clone)
-                                });
+                            let thumbnail =
+                                resolved[source_index]
+                                    .thumbnail
+                                    .as_deref()
+                                    .and_then(|filename| {
+                                        self.thumbnails
+                                            .get(&format!(
+                                                "{}|{}",
+                                                category.slug(),
+                                                filename.to_ascii_lowercase()
+                                            ))
+                                            .and_then(Clone::clone)
+                                    });
                             let target_index = self.target_index.entry(key.clone()).or_insert(0);
                             let selected_car = self.selected_car.clone();
                             let match_swapped_item = self.match_swapped_item;
@@ -1286,9 +1422,15 @@ impl SwapperState {
                             if *target_index >= items.len()
                                 || !target_allowed(*target_index, &items[*target_index])
                             {
-                                *target_index = items.iter().enumerate().position(|(index, item)| target_allowed(index, item)).unwrap_or(0);
+                                *target_index = items
+                                    .iter()
+                                    .enumerate()
+                                    .position(|(index, item)| target_allowed(index, item))
+                                    .unwrap_or(0);
                             }
-                            let has_target = items.get(*target_index).is_some_and(|item| target_allowed(*target_index, item));
+                            let has_target = items
+                                .get(*target_index)
+                                .is_some_and(|item| target_allowed(*target_index, item));
                             egui::Frame::group(columns[column].style()).show(
                                 &mut columns[column],
                                 |ui| {
@@ -1321,9 +1463,9 @@ impl SwapperState {
                                         ui.label(
                                             egui::RichText::new(
                                                 if category == SwapCategory::Skins {
-                                                    "Replace with decal"
+                                                    t("tab-replace-with-decal")
                                                 } else {
-                                                    "Replace item"
+                                                    t("tab-replace-item")
                                                 },
                                             )
                                             .size(11.0)
@@ -1351,15 +1493,15 @@ impl SwapperState {
                                                         .entry(key.clone())
                                                         .or_default();
                                                     ui.horizontal(|ui| {
-                                                        ui.label("Filter:");
+                                                        ui.label(t("spoofer-filter"));
                                                         ui.add(
                                                             egui::TextEdit::singleline(
                                                                 target_filter,
                                                             )
-                                                            .hint_text("Search items...")
+                                                            .hint_text(t("tab-search-items"))
                                                             .desired_width(150.0),
                                                         );
-                                                        if ui.small_button("Clear").clicked() {
+                                                        if ui.small_button(t("spoofer-clear")).clicked() {
                                                             target_filter.clear();
                                                         }
                                                     });
@@ -1396,38 +1538,44 @@ impl SwapperState {
                                             );
                                         });
                                         if !has_target {
-                                            ui.weak("No owned replacement is available");
+                                            ui.weak(t("tab-no-owned-replacement-is-available"));
                                             return;
                                         }
-                                        let selected_paint = self.swap_paint.entry(key.clone()).or_default();
-                                        if painted_swap::supports(&source.upk) {
-                                            egui::ComboBox::from_id_salt(("swap_paint", &key))
-                                                .selected_text(format!("Paint: {}", selected_paint.label()))
-                                                .show_ui(ui, |ui| {
-                                                    for paint in SwapPaint::ALL {
-                                                        ui.selectable_value(selected_paint, paint, paint.label());
-                                                    }
-                                                });
-                                            ui.weak("Experimental paint — check in game");
+                                        let selected_paint =
+                                            self.swap_paint.entry(key.clone()).or_default();
+                                        if source.paintable || painted_swap::supports(&source.upk) {
+                                            ui.push_id(("swap_paint", &key), |ui| {
+                                                painted_swap::controls(ui, selected_paint);
+                                            });
                                         }
                                         let paint = *selected_paint;
+                                        let mut speed = 1.0;
+                                        if self.speed_enabled {
+                                            let selected_speed =
+                                                self.swap_speed.entry(key.clone()).or_insert(1.0);
+                                            ui.push_id(("swap_speed", &key), |ui| {
+                                                crate::speed_patch::speed_slider(ui, selected_speed);
+                                            });
+                                            speed = *selected_speed;
+                                        }
                                         let active = self.active.iter().find(|swap| {
-                                            swap.paint == paint && swap.category == category.slug()
+                                            swap.paint == paint
+                                                && swap.category == category.slug()
                                                 && swap.source_upk.eq_ignore_ascii_case(&source.upk)
                                                 && swap
                                                     .target_upk
                                                     .eq_ignore_ascii_case(&items[*target_index].upk)
                                         });
                                         if let Some(active) = active {
-                                            ui.weak(format!("Set as {}", active.target_name));
+                                            ui.weak(t_args("tab-set-as-active", &[("active", active.target_name.to_string().into())]));
                                         }
                                         if ui
                                             .add_sized(
                                                 [ui.available_width(), 24.0],
                                                 egui::Button::new(if active.is_some() {
-                                                    "Restore"
+                                                    t("app-restore")
                                                 } else {
-                                                    "Apply"
+                                                    t("ball-apply")
                                                 }),
                                             )
                                             .clicked()
@@ -1437,6 +1585,7 @@ impl SwapperState {
                                                 *target_index,
                                                 active.is_some(),
                                                 paint,
+                                                speed,
                                             ));
                                         }
                                     });
@@ -1447,13 +1596,16 @@ impl SwapperState {
                     ui.add_space(6.0);
                 }
             });
-        if let Some((source_index, target_index, restoring, paint)) = action {
+        if let Some((source_index, target_index, restoring, paint, speed)) = action {
+            if crate::messages::block_item_action_if_game_running(tx) {
+                return owned_filter_requested;
+            }
             let source = items[source_index].clone();
             let target = items[target_index].clone();
             let result = if restoring {
                 self.restore_swap(&target.upk, cooked_pc, backups_dir)
             } else {
-                self.apply_swap(category, &source, &target, paint, cooked_pc, backups_dir)
+                self.apply_swap(category, &source, &target, paint, speed, cooked_pc, backups_dir)
             };
             match result {
                 Ok(()) => {
@@ -1488,46 +1640,64 @@ impl SwapperState {
         ui.horizontal(|ui| {
             ui.heading(category.label());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Reload Catalogs").clicked() {
+                if ui.button(t("app-reload-catalogs")).clicked() {
                     let _ = tx.send(AppMsg::ReloadCatalogs);
                 }
             });
         });
         ui.horizontal(|ui| {
-            ui.strong("Search:");
+            ui.strong(t("spoofer-search"));
             let search = self.spawn_search.entry(category).or_default();
-            if ui.add(egui::TextEdit::singleline(search)
-                .hint_text(format!("Search {}...", category.label().to_lowercase()))
-                .desired_width(300.0)).changed() {
+            if ui
+                .add(
+                    egui::TextEdit::singleline(search)
+                        .hint_text(t_args("tab-search-category", &[("category", (category.label().to_lowercase()).to_string().into())]))
+                        .desired_width(300.0),
+                )
+                .changed()
+            {
                 self.spawn_page.insert(category, 0);
             }
-            if ui.button("Clear").clicked() {
+            if ui.button(t("spoofer-clear")).clicked() {
                 search.clear();
                 self.spawn_page.insert(category, 0);
             }
         });
         ui.separator();
         ui.add_space(10.0);
+        self.thumbnail_status(ui, category);
         let Some(items) = self.catalogs.get(&category).cloned() else {
-            ui.weak("Catalog could not be loaded");
+            ui.weak(t("spawn-catalog-could-not-be-loaded"));
             return None;
         };
         let Some(resolved) = self.resolved_items(ui, category, cooked_pc, &items) else {
             return None;
         };
-        let query = self.spawn_search.get(&category).map(String::as_str).unwrap_or("").to_ascii_lowercase();
-        let filtered: Vec<_> = items.iter().enumerate()
-            .filter(|(index, item)| item.product_id.is_some_and(|id| id > 0)
-                && resolved[*index].available
-                && resolved[*index].thumbnail.as_ref().is_some_and(|filename| {
-                    !self.failed_thumbnails.contains(&format!("{}|{}", category.slug(), filename.to_ascii_lowercase()))
-                })
-                && (query.is_empty() || item_label(category, item).to_ascii_lowercase().contains(&query)
-                    || item.upk.to_ascii_lowercase().contains(&query)
-                    || item.product_id.is_some_and(|id| id.to_string().contains(&query))))
-            .map(|(index, _)| index).collect();
+        let query = self
+            .spawn_search
+            .get(&category)
+            .map(String::as_str)
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let filtered: Vec<_> = items
+            .iter()
+            .enumerate()
+            .filter(|(index, item)| {
+                item.product_id.is_some_and(|id| id > 0)
+                    && resolved[*index].available
+                    && (query.is_empty()
+                        || item_label(category, item)
+                            .to_ascii_lowercase()
+                            .contains(&query)
+                        || item.upk.to_ascii_lowercase().contains(&query)
+                        || item
+                            .product_id
+                            .is_some_and(|id| id.to_string().contains(&query)))
+            })
+            .map(|(index, _)| index)
+            .collect();
         if filtered.is_empty() {
-            ui.vertical_centered(|ui| ui.weak("No spawnable items match the search."));
+            ui.vertical_centered(|ui| ui.weak(t("spawn-no-spawnable-items-match-the-search")));
             return None;
         }
         const PAGE_SIZE: usize = 16;
@@ -1535,59 +1705,118 @@ impl SwapperState {
         let page = self.spawn_page.entry(category).or_insert(0);
         *page = (*page).min(total_pages - 1);
         ui.horizontal(|ui| {
-            ui.label(format!("Page {} of {}  ({} items)", *page + 1, total_pages, filtered.len()));
-            if ui.add_enabled(*page > 0, egui::Button::new("Previous")).clicked() { *page -= 1; }
-            if ui.add_enabled(*page + 1 < total_pages, egui::Button::new("Next")).clicked() { *page += 1; }
+            ui.label(t_args("tab-page-page-of-total-pages-filtered", &[("page", (*page + 1).to_string().into()), ("total_pages", total_pages.to_string().into()), ("filtered", (filtered.len()).to_string().into())]));
+            if ui
+                .add_enabled(*page > 0, egui::Button::new(t("ball-previous")))
+                .clicked()
+            {
+                *page -= 1;
+            }
+            if ui
+                .add_enabled(*page + 1 < total_pages, egui::Button::new(t("ball-next")))
+                .clicked()
+            {
+                *page += 1;
+            }
         });
         ui.add_space(6.0);
         let visible = &filtered[*page * PAGE_SIZE..((*page + 1) * PAGE_SIZE).min(filtered.len())];
         let fallback: Arc<[u8]> = fs::read(self.base_dir.join("assets").join("hebnix.png"))
-            .unwrap_or_else(|_| include_bytes!("../../assets/hebnix.png").to_vec()).into();
+            .unwrap_or_else(|_| include_bytes!("../../assets/hebnix.png").to_vec())
+            .into();
         for &index in visible {
             if let Some(filename) = resolved[index].thumbnail.as_deref() {
                 self.queue_thumbnail(ui, category, &filename, cooked_pc);
             }
         }
         let mut spawn = None;
-        egui::ScrollArea::vertical().id_salt(("spawner_grid", category))
-            .auto_shrink([false, false]).show(ui, |ui| {
+        egui::ScrollArea::vertical()
+            .id_salt(("spawner_grid", category))
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
                 for row in visible.chunks(4) {
                     ui.columns(4, |columns| {
                         for (column, &index) in row.iter().enumerate() {
                             let item = &items[index];
-                            let thumbnail = resolved[index].thumbnail.as_deref()
-                                .and_then(|filename| self.thumbnails.get(&format!("{}|{}", category.slug(), filename.to_ascii_lowercase())).and_then(Clone::clone))
+                            let thumbnail = resolved[index]
+                                .thumbnail
+                                .as_deref()
+                                .and_then(|filename| {
+                                    self.thumbnails
+                                        .get(&format!(
+                                            "{}|{}",
+                                            category.slug(),
+                                            filename.to_ascii_lowercase()
+                                        ))
+                                        .and_then(Clone::clone)
+                                })
                                 .unwrap_or_else(|| fallback.clone());
-                            egui::Frame::group(columns[column].style()).show(&mut columns[column], |ui| {
-                                ui.set_min_height(238.0);
-                                ui.vertical_centered(|ui| {
-                                    ui.add(egui::Image::from_bytes(
-                                        format!("bytes://spawner/{}/{}/{:08x}", category.slug(), index, crc32fast::hash(&thumbnail)),
-                                        thumbnail).fit_to_exact_size(egui::vec2(120.0, 76.0)));
-                                    let label = item_label(category, item);
-                                    ui.strong(shorten_for_card(&label)).on_hover_text(format!("{label}\n{}", item.upk));
-                                    ui.weak(format!("ID: {}", item.product_id.unwrap_or_default()));
-                                    let mut paint = 0;
-                                    if item.paintable {
-                                        ui.add_space(6.0);
-                                        ui.label("Paint");
-                                        let selected = self.spawn_paint.entry((category, item.product_id.unwrap_or_default())).or_insert(0);
-                                        egui::ComboBox::from_id_salt(("spawn_paint", category, item.product_id))
+                            egui::Frame::group(columns[column].style()).show(
+                                &mut columns[column],
+                                |ui| {
+                                    ui.set_min_height(238.0);
+                                    ui.vertical_centered(|ui| {
+                                        ui.add(
+                                            egui::Image::from_bytes(
+                                                format!(
+                                                    "bytes://spawner/{}/{}/{:08x}",
+                                                    category.slug(),
+                                                    index,
+                                                    crc32fast::hash(&thumbnail)
+                                                ),
+                                                thumbnail,
+                                            )
+                                            .fit_to_exact_size(egui::vec2(120.0, 76.0)),
+                                        );
+                                        let label = item_label(category, item);
+                                        ui.strong(shorten_for_card(&label))
+                                            .on_hover_text(format!("{label}\n{}", item.upk));
+                                        ui.weak(t_args("spawn-id-item", &[("item", (item.product_id.unwrap_or_default()).to_string().into())]));
+                                        let mut paint = 0;
+                                        if item.paintable {
+                                            ui.add_space(6.0);
+                                            ui.label(t("spawn-paint"));
+                                            let selected = self
+                                                .spawn_paint
+                                                .entry((
+                                                    category,
+                                                    item.product_id.unwrap_or_default(),
+                                                ))
+                                                .or_insert(0);
+                                            egui::ComboBox::from_id_salt((
+                                                "spawn_paint",
+                                                category,
+                                                item.product_id,
+                                            ))
                                             .width(ui.available_width())
                                             .selected_text(crate::item_spawning::PAINTS[*selected])
-                                            .show_ui(ui, |ui| {
-                                                for (index, name) in crate::item_spawning::PAINTS.iter().enumerate() {
-                                                    ui.selectable_value(selected, index, *name);
-                                                }
-                                            });
-                                        paint = *selected;
-                                    }
-                                    ui.add_space(8.0);
-                                    if ui.add_sized([ui.available_width(), 26.0], egui::Button::new("Spawn")).clicked() {
-                                        spawn = item.product_id.map(|id| (id, paint));
-                                    }
-                                });
-                            });
+                                            .show_ui(
+                                                ui,
+                                                |ui| {
+                                                    for (index, name) in
+                                                        crate::item_spawning::PAINTS
+                                                            .iter()
+                                                            .enumerate()
+                                                    {
+                                                        ui.selectable_value(selected, index, *name);
+                                                    }
+                                                },
+                                            );
+                                            paint = *selected;
+                                        }
+                                        ui.add_space(8.0);
+                                        if ui
+                                            .add_sized(
+                                                [ui.available_width(), 26.0],
+                                                egui::Button::new(t("spawn-spawn")),
+                                            )
+                                            .clicked()
+                                        {
+                                            spawn = item.product_id.map(|id| (id, paint));
+                                        }
+                                    });
+                                },
+                            );
                         }
                     });
                     ui.add_space(6.0);

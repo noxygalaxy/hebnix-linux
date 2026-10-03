@@ -66,7 +66,10 @@ impl RawCapture {
         let fd = unsafe { OwnedFd::from_raw_fd(fd) };
         // wake up regularly so stop() is noticed without closing the fd
         // from under a blocked recvfrom
-        let timeout = libc::timeval { tv_sec: 0, tv_usec: 200_000 };
+        let timeout = libc::timeval {
+            tv_sec: 0,
+            tv_usec: 200_000,
+        };
         unsafe {
             libc::setsockopt(
                 fd.as_raw_fd(),
@@ -76,7 +79,10 @@ impl RawCapture {
                 std::mem::size_of::<libc::timeval>() as libc::socklen_t,
             );
         }
-        Ok(Self { fd, stop: AtomicBool::new(false) })
+        Ok(Self {
+            fd,
+            stop: AtomicBool::new(false),
+        })
     }
 
     /// Ok(None) on a timeout or a packet that wasn't sent by this machine
@@ -118,16 +124,16 @@ impl BeaconRelay {
     pub fn bind(host_tailnet_ip: IpAddr) -> Result<Self, String> {
         let socket = Socket::new(Domain::IPV4, Type::DGRAM, None)
             .map_err(|error| format!("could not create the beacon relay socket: {error}"))?;
-        socket
-            .set_broadcast(true)
-            .map_err(|error| format!("could not enable broadcast on the beacon relay socket: {error}"))?;
+        socket.set_broadcast(true).map_err(|error| {
+            format!("could not enable broadcast on the beacon relay socket: {error}")
+        })?;
         socket
             .set_nonblocking(true)
             .map_err(|error| error.to_string())?;
         let address: SocketAddr = (host_tailnet_ip, 0).into();
-        socket
-            .bind(&address.into())
-            .map_err(|error| format!("could not bind the beacon relay socket to {host_tailnet_ip}: {error}"))?;
+        socket.bind(&address.into()).map_err(|error| {
+            format!("could not bind the beacon relay socket to {host_tailnet_ip}: {error}")
+        })?;
 
         let (tx, rx) = mpsc::channel();
         let capture = spawn_capture_thread(tx)?;
@@ -177,7 +183,8 @@ fn is_discovery_broadcast(ip: &[u8], destination_port: u16) -> bool {
 
 fn spawn_capture_thread(tx: Sender<(Vec<u8>, SocketAddr, u16)>) -> Result<Arc<RawCapture>, String> {
     let capture = Arc::new(
-        RawCapture::open().map_err(|error| format!("could not start the beacon capture: {error}"))?,
+        RawCapture::open()
+            .map_err(|error| format!("could not start the beacon capture: {error}"))?,
     );
 
     let thread_capture = capture.clone();

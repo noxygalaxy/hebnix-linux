@@ -1,3 +1,4 @@
+use crate::i18n::{t, t_args};
 use aes::Aes256;
 use aes::cipher::generic_array::GenericArray;
 use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
@@ -1096,7 +1097,9 @@ pub fn patch_boost_meter(
     EncryptedPackage::load(live_raw, key_file)
         .map_err(|e| format!("Installed {} is not a valid package: {e}", GFX_UPK))?;
     crate::patcher::backup_guard::prepare(
-        Path::new(game_dir), Path::new(backup_dir), "boost-build.sha256",
+        Path::new(game_dir),
+        Path::new(backup_dir),
+        "boost-build.sha256",
         |name| name == format!("{}.bak", GFX_UPK),
     )?;
     let backup_upk = Path::new(backup_dir).join(format!("{}.bak", GFX_UPK));
@@ -1359,7 +1362,9 @@ impl BoostPatcherState {
 
         std::thread::spawn(move || {
             if let Err(error) = crate::patcher::backup_guard::check(
-                &cooked_pc_clone, &backups_dir_clone, "boost-build.sha256",
+                &cooked_pc_clone,
+                &backups_dir_clone,
+                "boost-build.sha256",
                 |name| name == format!("{}.bak", GFX_UPK),
             ) {
                 let _ = local_tx.send(BoostOp::Error(error));
@@ -1488,24 +1493,24 @@ impl BoostPatcherState {
             }
         }
 
-        ui.heading("Boost Meter Patcher");
+        ui.heading(t("tab-boost-meter-patcher"));
         ui.add_space(8.0);
 
         ui.horizontal(|ui| {
-            ui.strong("Search:");
+            ui.strong(t("spoofer-search"));
             let search_resp = ui.add(
                 egui::TextEdit::singleline(&mut self.search_input)
-                    .hint_text("Name or author...")
+                    .hint_text(t("ball-name-or-author"))
                     .desired_width(180.0),
             );
             let submitted =
                 search_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if ui.button("Search").clicked() || submitted {
+            if ui.button(t("ball-search")).clicked() || submitted {
                 self.search_filter = self.search_input.clone();
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Refresh").clicked() {
+                if ui.button(t("btn-refresh")).clicked() {
                     if self.source == PatchSource::Catalog {
                         self.catalog.refresh(ctx);
                     } else {
@@ -1521,7 +1526,7 @@ impl BoostPatcherState {
                 if ui
                     .add_enabled(
                         restore_enabled,
-                        egui::Button::new("Restore Original")
+                        egui::Button::new(t("ball-restore-original"))
                             .fill(egui::Color32::from_rgb(180, 50, 50)),
                     )
                     .clicked()
@@ -1532,11 +1537,11 @@ impl BoostPatcherState {
                 if ui
                     .add_enabled(
                         self.processing_target.is_none(),
-                        egui::Button::new("Import ZIP"),
+                        egui::Button::new(t("ball-import-zip")),
                     )
                     .clicked()
                 {
-                    let dialog = rfd::FileDialog::new().add_filter("ZIP Archives", &["zip"]);
+                    let dialog = rfd::FileDialog::new().add_filter(t("ball-zip-archives"), &["zip"]);
                     if let Some(file) = crate::winutil::parent_file_dialog(dialog).pick_file() {
                         if self.import_zip(&file, tx) {
                             self.source = PatchSource::Custom;
@@ -1546,7 +1551,7 @@ impl BoostPatcherState {
                     }
                 }
                 if ui
-                    .checkbox(&mut self.show_applied, "Show Applied")
+                    .checkbox(&mut self.show_applied, t("ball-show-applied"))
                     .changed()
                 {
                     self.page = 0;
@@ -1596,13 +1601,13 @@ impl BoostPatcherState {
                         if self.boosts.is_empty() {
                             ui.label(
                                 egui::RichText::new(
-                                    "No boost meters found in the /boosts/ directory.",
+                                    t("tab-no-boost-meters-found-in-the"),
                                 )
                                 .color(egui::Color32::GRAY),
                             );
                         } else {
                             ui.label(
-                                egui::RichText::new("No boost meters match your search.")
+                                egui::RichText::new(t("tab-no-boost-meters-match-your-search"))
                                     .color(egui::Color32::GRAY),
                             );
                         }
@@ -1614,15 +1619,15 @@ impl BoostPatcherState {
                 let pages = filtered.len().div_ceil(PAGE_SIZE).max(1);
                 self.page = self.page.min(pages - 1);
                 ui.horizontal(|ui| {
-                    ui.label(format!("Page {} of {}", self.page + 1, pages));
+                    ui.label(t_args("ball-page-page-of-pages", &[("page", (self.page + 1).to_string().into()), ("pages", pages.to_string().into())]));
                     if ui
-                        .add_enabled(self.page > 0, egui::Button::new("Previous"))
+                        .add_enabled(self.page > 0, egui::Button::new(t("ball-previous")))
                         .clicked()
                     {
                         self.page -= 1;
                     }
                     if ui
-                        .add_enabled(self.page + 1 < pages, egui::Button::new("Next"))
+                        .add_enabled(self.page + 1 < pages, egui::Button::new(t("ball-next")))
                         .clicked()
                     {
                         self.page += 1;
@@ -1689,7 +1694,7 @@ impl BoostPatcherState {
                                             && boost.glow_image.is_none()
                                             && boost.tint_image.is_none()
                                         {
-                                            ui.put(rect, egui::Label::new("No Image"));
+                                            ui.put(rect, egui::Label::new(t("ball-no-image")));
                                         }
                                         ui.strong(&boost.name);
                                         ui.add_space(5.0);
@@ -1704,7 +1709,7 @@ impl BoostPatcherState {
                                             if ui
                                                 .add_enabled(
                                                     !busy,
-                                                    egui::Button::new("Restore").min_size(
+                                                    egui::Button::new(t("app-restore")).min_size(
                                                         egui::vec2(ui.available_width(), 24.0),
                                                     ),
                                                 )
@@ -1720,7 +1725,7 @@ impl BoostPatcherState {
                                         } else if ui
                                             .add_enabled(
                                                 !busy,
-                                                egui::Button::new("Apply").min_size(egui::vec2(
+                                                egui::Button::new(t("ball-apply")).min_size(egui::vec2(
                                                     ui.available_width(),
                                                     24.0,
                                                 )),
@@ -1738,7 +1743,7 @@ impl BoostPatcherState {
                                         if ui
                                             .add_enabled(
                                                 !busy,
-                                                egui::Button::new("Delete")
+                                                egui::Button::new(t("presets-delete"))
                                                     .fill(egui::Color32::from_rgb(180, 50, 50))
                                                     .min_size(egui::vec2(
                                                         ui.available_width(),
@@ -1760,18 +1765,15 @@ impl BoostPatcherState {
 
         if let Some(boost_to_delete) = self.confirm_delete.clone() {
             let mut close = false;
-            egui::Window::new("Confirm Deletion")
+            egui::Window::new(t("render-confirm-deletion")).id(egui::Id::new("Confirm Deletion"))
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
-                    ui.label(format!(
-                        "Are you sure you want to delete '{}'?",
-                        boost_to_delete.name
-                    ));
+                    ui.label(t_args("tab-are-you-sure-you-want-to", &[("boost_to_delete", boost_to_delete.name.to_string().into())]));
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        if ui.button("Yes").clicked() {
+                        if ui.button(t("plugin-delete-prompt-yes")).clicked() {
                             for path in boost_to_delete.image_paths.values() {
                                 let _ = fs::remove_file(path);
                             }
@@ -1794,7 +1796,7 @@ impl BoostPatcherState {
                             )));
                             close = true;
                         }
-                        if ui.button("No").clicked() {
+                        if ui.button(t("plugin-delete-prompt-no")).clicked() {
                             close = true;
                         }
                     });
