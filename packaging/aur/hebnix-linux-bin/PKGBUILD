@@ -7,7 +7,7 @@ pkgname=hebnix-linux-bin
 # libxdo.so.4 Arch's xdotool package actually provides. v0.1.0 shipped
 # only the Ubuntu tarball and didn't run on Arch as a result; fixed in
 # v0.1.1.
-pkgver=0.2.0
+pkgver=2.2.0
 pkgrel=1
 pkgdesc="Rocket League overlay, stats tracker and item-changer for Linux (Hyprland/wlroots), prebuilt upstream binary"
 arch=('x86_64')

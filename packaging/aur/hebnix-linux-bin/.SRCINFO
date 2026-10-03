@@ -1,6 +1,6 @@
 pkgbase = hebnix-linux-bin
 	pkgdesc = Rocket League overlay, stats tracker and item-changer for Linux (Hyprland/wlroots), prebuilt upstream binary
-	pkgver = 0.2.0
+	pkgver = 2.2.0
 	pkgrel = 1
 	url = https://github.com/xplodingeggo/hebnix-linux
 	install = hebnix.install
@@ -23,7 +23,7 @@ pkgbase = hebnix-linux-bin
 	optdepends = dotnet-runtime: downloading Steam Workshop maps in the Import Map tab
 	provides = hebnix
 	conflicts = hebnix-linux
-	source = https://github.com/xplodingeggo/hebnix-linux/releases/download/v0.2.0/hebnix-0.2.0-linux-x86_64-arch.tar.gz
+	source = https://github.com/xplodingeggo/hebnix-linux/releases/download/v2.2.0/hebnix-2.2.0-linux-x86_64-arch.tar.gz
 	sha256sums = SKIP
 
 pkgname = hebnix-linux-bin
