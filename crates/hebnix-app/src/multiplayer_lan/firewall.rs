@@ -17,11 +17,47 @@ const DISCOVERY_PORTS: &str = "14000-14010, 14777";
 /// the headscale server hands out addresses from this range
 const TAILNET_SUBNET: &str = "10.242.77.0/24";
 
+const CHAIN_NAT: &str = "postrouting";
+const NAT_COMMENT: &str = "hebnix-workshop-multihome-nat";
+
 /// tailscaled only makes outbound connections and receives WireGuard on
-/// sockets it opened itself, which conntrack already lets back in
+/// sockets it opened itself, which conntrack already lets back in.
+///
+/// Rocket League is started with `-multihome=<tailnet ip>`, so every socket
+/// it opens, including the HTTPS ones to PsyNet/EOS, uses that address as its
+/// source. The kernel still routes those over the normal default route, with
+/// a 10.242.77.x source the router drops, and the game never gets past the
+/// start screen. Masquerading that source on its way out of any other
+/// interface gives those connections the real address and lets the replies
+/// find their way back. Traffic to peers goes out the tailnet interface and
+/// is left alone.
 pub fn ensure_sidecar_rule(executable: &Path) -> Result<(), String> {
     let _ = executable;
-    Ok(())
+    ensure_internet_nat()
+}
+
+fn ensure_internet_nat() -> Result<(), String> {
+    ensure_table()?;
+    let chain_exists = super::caps::command_with_net_admin("nft")
+        .args(["list", "chain", "inet", "hebnix", CHAIN_NAT])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !chain_exists {
+        run(&[
+            "add", "chain", "inet", "hebnix", CHAIN_NAT, "{", "type", "nat", "hook", "postrouting",
+            "priority", "srcnat", ";", "policy", "accept", ";", "}",
+        ])?;
+    }
+    if rule_exists(NAT_COMMENT)? {
+        return Ok(());
+    }
+    let interface = format!("\"{}\"", super::tsnet_sidecar::TUN_NAME);
+    let comment = format!("\"{NAT_COMMENT}\"");
+    run(&[
+        "add", "rule", "inet", "hebnix", CHAIN_NAT, "ip", "saddr", TAILNET_SUBNET, "oifname",
+        "!=", &interface, "masquerade", "comment", &comment,
+    ])
 }
 
 /// relayed beacons from peers arrive on the discovery ports
