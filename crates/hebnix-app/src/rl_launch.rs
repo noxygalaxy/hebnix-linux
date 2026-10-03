@@ -167,6 +167,82 @@ fn launch_uri(uri: &str) -> Result<(), String> {
         })
 }
 
+/// Heroic's own single-instance lock names the running instance's pid
+/// (`<host>-<pid>`). None when there is no Heroic config to ask.
+fn heroic_running() -> Option<bool> {
+    let lock = dirs::config_dir()?.join("heroic").join("SingletonLock");
+    if !lock.parent()?.is_dir() {
+        return None;
+    }
+    let Ok(target) = std::fs::read_link(&lock) else {
+        return Some(false);
+    };
+    let pid: u32 = target.to_string_lossy().rsplit('-').next()?.parse().ok()?;
+    // a zombie (exited, not yet reaped) still has a /proc entry
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok();
+    Some(stat.is_some_and(|stat| {
+        stat.rsplit_once(')')
+            .and_then(|(_, rest)| rest.split_whitespace().next())
+            .is_some_and(|state| state != "Z")
+    }))
+}
+
+/// Heroic decides whether to start a game in offline mode from its own
+/// connectivity state, which starts as "check-online" and only turns
+/// "online" after the first ping finishes, about a second after startup. A
+/// `heroic://launch` URL handed to a freshly started Heroic arrives before
+/// that, so the game gets `--offline`, no Epic login code, and Rocket League
+/// sits on the start screen with EOS/PsyNet errors. So when Heroic isn't
+/// running yet, start it without the URL first and wait for it to report
+/// online; the URL then goes to the already-running instance.
+fn prestart_heroic(binary: &str) {
+    if heroic_running() != Some(false) {
+        return;
+    }
+    tracing::info!("rl_launch: Heroic isn't running, starting it first so it can check connectivity");
+    let started = std::time::SystemTime::now();
+    if let Err(error) = std::process::Command::new(binary)
+        .args(["--no-gui", "--no-sandbox"])
+        .spawn()
+    {
+        tracing::warn!("rl_launch: could not pre-start '{binary}': {error}");
+        return;
+    }
+    let log = dirs::state_dir()
+        .or_else(|| dirs::home_dir().map(|home| home.join(".local/state")))
+        .map(|dir| dir.join("Heroic/logs/heroic.log"));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let Some(log) = &log else {
+            // no log to watch: give it a fixed head start instead
+            std::thread::sleep(std::time::Duration::from_secs(8));
+            return;
+        };
+        let fresh = std::fs::metadata(log)
+            .and_then(|meta| meta.modified())
+            .is_ok_and(|modified| modified >= started);
+        if fresh && heroic_reports_online(log) {
+            // let it finish starting up before the launch request
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            return;
+        }
+    }
+    tracing::warn!("rl_launch: Heroic didn't report being online in time, launching anyway");
+}
+
+/// is the newest `Connectivity:` line in Heroic's log "online"
+fn heroic_reports_online(log: &std::path::Path) -> bool {
+    std::fs::read_to_string(log)
+        .ok()
+        .and_then(|text| {
+            text.lines()
+                .rev()
+                .find_map(|line| line.split("Connectivity:").nth(1).map(|state| state.trim() == "online"))
+        })
+        .unwrap_or(false)
+}
+
 fn heroic_launch(cfg: &RlLaunchCfg, multihome: Option<&str>) -> Result<(), String> {
     let mut uri = format!(
         "heroic://launch?appName={}&runner={}",
@@ -175,6 +251,7 @@ fn heroic_launch(cfg: &RlLaunchCfg, multihome: Option<&str>) -> Result<(), Strin
     if let Some(address) = multihome {
         uri.push_str(&format!("&arg=-multihome%3D{address}"));
     }
+    prestart_heroic(&cfg.heroic_binary);
     tracing::info!(
         "rl_launch: spawning '{}' --no-gui --no-sandbox {uri}",
         cfg.heroic_binary
