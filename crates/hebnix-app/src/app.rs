@@ -28,10 +28,10 @@ use crate::ui::workshop::{ImageState, WorkshopState};
 use crate::winutil;
 
 pub const APP_VERSION: &str = "2.2.0";
-/// the actual hebnix-linux release version (shown in the About tab), as
-/// opposed to APP_VERSION above which tracks Windows Hebnix's engine/plugin
-/// compat version and is unrelated to this port's own release numbering.
-pub const LINUX_PORT_VERSION: &str = "0.3.0-dev";
+/// the hebnix-linux version shown in the About tab. kept equal to the Windows
+/// version it is based on (APP_VERSION above, which also tracks the engine/
+/// plugin compat version).
+pub const LINUX_PORT_VERSION: &str = "2.2.0";
 
 pub const DEFAULT_WIDTH: f32 = 1250.0;
 pub const DEFAULT_HEIGHT: f32 = 700.0;
@@ -389,6 +389,7 @@ enum Tab {
     Console,
     Workshop,
     Spoofer,
+    Colours,
     Patcher,
     Settings,
     Plugins,
@@ -397,10 +398,11 @@ enum Tab {
 }
 
 impl Tab {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::Console,
         Self::Workshop,
         Self::Spoofer,
+        Self::Colours,
         Self::Patcher,
         Self::Settings,
         Self::Plugins,
@@ -415,6 +417,7 @@ impl Tab {
             Self::Workshop => t("tab-workshop"),
             Self::Spoofer => t("tab-spoofer"),
             Self::Patcher => t("tab-patcher"),
+            Self::Colours => t("tab-colours"),
             Self::Settings => t("tab-settings"),
             Self::Plugins => t("tab-plugins"),
             Self::RlApi => t("tab-rlapi"),
@@ -430,6 +433,7 @@ impl Tab {
             Self::Workshop => "Maps",
             Self::Spoofer => "Spoofer",
             Self::Patcher => "Items",
+            Self::Colours => "Colours",
             Self::Settings => "Settings",
             Self::Plugins => "Plugins",
             Self::RlApi => "Experimental",
@@ -462,7 +466,6 @@ enum PatcherSubTab {
     Ball,
     BoostMeter,
     Decal,
-    Colours,
     Swapper(crate::swapper::SwapCategory),
     Active,
     Presets,
@@ -6148,6 +6151,7 @@ impl eframe::App for HebnixApp {
                         Tab::Console,
                         Tab::Workshop,
                         Tab::Spoofer,
+                        Tab::Colours,
                         Tab::Patcher,
                         Tab::Settings,
                         Tab::Plugins,
@@ -6177,6 +6181,22 @@ impl eframe::App for HebnixApp {
                         self.workshop.render(ui, &rl_path, &self.config.rl_launch, &tx);
                     }
                     Tab::Spoofer => self.render_spoofer_tab(ui),
+                    Tab::Colours => {
+                        let cooked_pc = PathBuf::from(&self.config.settings.rl_path)
+                            .join("TAGame")
+                            .join("CookedPCConsole");
+                        let backups_dir = cooked_pc.join("Backups");
+                        self.colours.poll();
+                        if let Some(action) = self.colours.render(ui, &backups_dir) {
+                            if crate::messages::block_item_action_if_game_running(&self.tx) {
+                                self.console.write(
+                                    "[Colours] Close Rocket League before changing game files.",
+                                );
+                            } else {
+                                self.colours.begin(action, &cooked_pc, &backups_dir, &self.tx, ctx);
+                            }
+                        }
+                    }
                     Tab::Patcher => {
                         ui.horizontal(|ui| {
                             ui.selectable_value(&mut self.items_mode, ItemsMode::Swapper, t("app-items-swapper"));
@@ -6293,11 +6313,6 @@ impl eframe::App for HebnixApp {
                                             PatcherSubTab::Decal,
                                             t("app-decal-patcher"),
                                         );
-                                        ui.selectable_value(
-                                            &mut self.patcher_subtab,
-                                            PatcherSubTab::Colours,
-                                            "Colours",
-                                        );
                                         ui.separator();
                                         for category in crate::swapper::SwapCategory::ALL {
                                             ui.selectable_value(
@@ -6380,24 +6395,6 @@ impl eframe::App for HebnixApp {
                                         ctx,
                                         &mut self.config,
                                     );
-                                }
-                                PatcherSubTab::Colours => {
-                                    self.colours.poll();
-                                    if let Some(action) = self.colours.render(ui, &backups_dir) {
-                                        if hebnix_sdk::process::is_rocket_league_running() {
-                                            self.console.write(
-                                                "[Colours] Close Rocket League before changing game files.",
-                                            );
-                                        } else {
-                                            self.colours.begin(
-                                                action,
-                                                &cooked_pc,
-                                                &backups_dir,
-                                                &self.tx,
-                                                ctx,
-                                            );
-                                        }
-                                    }
                                 }
                                 PatcherSubTab::Swapper(category) => {
                                     let owned_ids = self.spoofer_mgr.owned_product_ids();
