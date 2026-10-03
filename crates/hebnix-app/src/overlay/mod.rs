@@ -1,4 +1,5 @@
-//! click-through game overlay, wlr-layer-shell backend (see `wayland.rs`).
+//! click-through game overlay: wlr-layer-shell on Wayland (`wayland.rs`), an
+//! ARGB window on X11 (`x11.rs`).
 //!
 //! plugins draw via the free fns here (line, rect, ..) which paint onto a
 //! tiny-skia pixmap that's shared with the compositor over wl_shm. all on
@@ -15,6 +16,7 @@
 //! else the compositor is hiding.
 
 mod wayland;
+mod x11;
 
 use std::cell::RefCell;
 
@@ -365,26 +367,80 @@ fn decode_image(path: &str) -> Option<Pixmap> {
     Some(pixmap)
 }
 
+/// the platform backend: wlr-layer-shell on Wayland, an ARGB window on X11
+enum Backend {
+    Wayland(wayland::WaylandOverlay),
+    X11(x11::X11Overlay),
+}
+
+impl Backend {
+    fn is_closed(&self) -> bool {
+        match self {
+            Backend::Wayland(o) => o.is_closed(),
+            Backend::X11(o) => o.is_closed(),
+        }
+    }
+
+    fn poll_size(&mut self) -> Option<(u32, u32)> {
+        match self {
+            Backend::Wayland(o) => o.poll_size(),
+            Backend::X11(o) => o.poll_size(),
+        }
+    }
+
+    fn present(&mut self, pixmap: &Pixmap) {
+        match self {
+            Backend::Wayland(o) => o.present(pixmap),
+            Backend::X11(o) => o.present(pixmap),
+        }
+    }
+
+    fn hide(&mut self) {
+        match self {
+            Backend::Wayland(o) => o.hide(),
+            Backend::X11(o) => o.hide(),
+        }
+    }
+
+    /// Wayland session -> layer-shell, otherwise X11 if there is a display
+    fn create() -> Result<Self, String> {
+        let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty());
+        if wayland {
+            return wayland::WaylandOverlay::new().map(Backend::Wayland);
+        }
+        if std::env::var_os("DISPLAY").is_some_and(|v| !v.is_empty()) {
+            return x11::X11Overlay::new().map(Backend::X11);
+        }
+        Err("no WAYLAND_DISPLAY or DISPLAY set".to_string())
+    }
+}
+
 /// the overlay window
 pub struct Overlay {
-    backend: Option<wayland::WaylandOverlay>,
+    backend: Option<Backend>,
     last_reconnect: Option<std::time::Instant>,
 }
 
 impl Overlay {
     pub fn new() -> Self {
-        match wayland::WaylandOverlay::new() {
-            Ok(o) => {
-                tracing::info!("game overlay: wlr-layer-shell backend");
-                Overlay { backend: Some(o), last_reconnect: None }
+        match Backend::create() {
+            Ok(backend) => {
+                tracing::info!(
+                    "game overlay: {} backend",
+                    match backend {
+                        Backend::Wayland(_) => "wlr-layer-shell",
+                        Backend::X11(_) => "X11",
+                    }
+                );
+                Overlay { backend: Some(backend), last_reconnect: None }
             }
             Err(e) => {
                 tracing::warn!(
                     "overlay unavailable ({e}); drawing calls will be no-ops. This needs a \
-                     wlroots-based Wayland compositor with wlr-layer-shell support (Hyprland, \
-                     Sway, etc)."
+                     Wayland compositor with wlr-layer-shell (Hyprland, Sway, ...), or an X11 \
+                     session with a compositing manager (Cinnamon, XFCE, i3 + picom, ...)."
                 );
-                Overlay { backend: None, last_reconnect: None }
+                Overlay { backend: None, last_reconnect: Some(std::time::Instant::now()) }
             }
         }
     }
@@ -413,10 +469,21 @@ impl Overlay {
             if cooldown_elapsed {
                 tracing::warn!("game overlay: connection died, reconnecting");
                 self.last_reconnect = Some(std::time::Instant::now());
-                self.backend = wayland::WaylandOverlay::new().ok();
+                self.backend = Backend::create().ok();
             } else {
                 return;
             }
+        }
+        // X11: the compositing manager may be started after Hebnix, so keep
+        // trying now and then when it was missing at startup
+        if self.backend.is_none()
+            && std::env::var_os("WAYLAND_DISPLAY").is_none_or(|v| v.is_empty())
+            && self
+                .last_reconnect
+                .is_none_or(|t| t.elapsed() > std::time::Duration::from_secs(10))
+        {
+            self.last_reconnect = Some(std::time::Instant::now());
+            self.backend = Backend::create().ok();
         }
         let Some(backend) = self.backend.as_mut() else {
             return;

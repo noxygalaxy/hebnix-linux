@@ -172,7 +172,12 @@ fn main() -> eframe::Result {
         // GdkWindow to do anything -- on an X11-backed window
         // init_layer_shell() silently no-ops, so both the tray icon and the
         // html overlay's window need this forced.
-        std::env::set_var("GDK_BACKEND", "wayland");
+        // linux-port: only on a Wayland session. On X11 (i3, Cinnamon, XFCE,
+        // MATE, ...) forcing it makes gtk::init() fail, which would take the
+        // tray icon and the HTML overlay down with it.
+        if std::env::var_os("WAYLAND_DISPLAY").is_some_and(|value| !value.is_empty()) {
+            std::env::set_var("GDK_BACKEND", "wayland");
+        }
     }
 
     // hidden one-shot helper mode (`--priv-action <action> <base_dir>`),

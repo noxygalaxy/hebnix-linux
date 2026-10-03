@@ -24,6 +24,8 @@ nix = { version = "0.29", features = ["process", "signal"] }
 evdev = "0.13"
 gilrs = "0.11"
 libloading = "0.8"
+# X11 (EWMH window queries/actions, RandR monitors) for i3 / Cinnamon / XFCE etc.
+x11rb = { version = "0.13", features = ["randr"] }
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

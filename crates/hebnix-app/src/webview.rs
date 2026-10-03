@@ -38,6 +38,29 @@ pub struct WebviewOverlay {
     last_error: Option<String>,
 }
 
+/// layer-shell only exists on Wayland; on X11 (i3, Cinnamon, XFCE, ...) the
+/// overlay is a plain override-redirect window instead
+fn is_wayland_session() -> bool {
+    std::env::var_os("WAYLAND_DISPLAY").is_some_and(|value| !value.is_empty())
+}
+
+/// X11: (x, y, width, height) of the monitor Rocket League is on, else the
+/// primary monitor
+fn x11_target() -> (i32, i32, i32, i32) {
+    if let Some((l, t, r, b)) = hebnix_sdk::process::rocket_league_monitor_rect() {
+        if r > l && b > t {
+            return (l, t, r - l, b - t);
+        }
+    }
+    gdk::Display::default()
+        .and_then(|display| display.primary_monitor().or_else(|| display.monitor(0)))
+        .map(|monitor| {
+            let area = monitor.geometry();
+            (area.x(), area.y(), area.width(), area.height())
+        })
+        .unwrap_or((0, 0, 1920, 1080))
+}
+
 fn file_url(path: &Path) -> String {
     url::Url::from_file_path(path)
         .map(|u| u.to_string())
@@ -117,7 +140,18 @@ impl WebviewOverlay {
             return Err(format!("gtk::init() failed: {e}"));
         }
 
-        let window = gtk::Window::new(gtk::WindowType::Toplevel);
+        let wayland = is_wayland_session();
+        if !wayland && !hebnix_sdk::process::x11::compositor_running() {
+            return Err("the HTML overlay needs a compositing manager (Cinnamon/Muffin has one; \
+                        i3 needs picom or similar)"
+                .to_string());
+        }
+        // X11: an override-redirect popup, so no window manager tiles, decorates or focuses it
+        let window = gtk::Window::new(if wayland {
+            gtk::WindowType::Toplevel
+        } else {
+            gtk::WindowType::Popup
+        });
         window.set_decorated(false);
         window.set_app_paintable(true);
         if let Some(screen) = gtk::prelude::GtkWindowExt::screen(&window) {
@@ -126,22 +160,33 @@ impl WebviewOverlay {
             }
         }
 
-        window.init_layer_shell();
-        window.set_layer(gtk_layer_shell::Layer::Overlay);
-        window.set_namespace("hebnix-html-overlay");
-        for edge in [
-            gtk_layer_shell::Edge::Top,
-            gtk_layer_shell::Edge::Bottom,
-            gtk_layer_shell::Edge::Left,
-            gtk_layer_shell::Edge::Right,
-        ] {
-            window.set_anchor(edge, true);
+        if wayland {
+            window.init_layer_shell();
+            window.set_layer(gtk_layer_shell::Layer::Overlay);
+            window.set_namespace("hebnix-html-overlay");
+            for edge in [
+                gtk_layer_shell::Edge::Top,
+                gtk_layer_shell::Edge::Bottom,
+                gtk_layer_shell::Edge::Left,
+                gtk_layer_shell::Edge::Right,
+            ] {
+                window.set_anchor(edge, true);
+            }
+            window.set_exclusive_zone(-1);
+            // pure HUD, never grabs keyboard/pointer -- plugin pages aren't
+            // interactive, same click-through intent as the draw overlay.
+            window.set_keyboard_interactivity(false);
+            window.set_keyboard_mode(gtk_layer_shell::KeyboardMode::None);
+        } else {
+            window.set_keep_above(true);
+            window.set_accept_focus(false);
+            window.set_focus_on_map(false);
+            window.set_skip_taskbar_hint(true);
+            window.set_skip_pager_hint(true);
+            let (x, y, w, h) = x11_target();
+            window.move_(x, y);
+            window.set_default_size(w, h);
         }
-        window.set_exclusive_zone(-1);
-        // pure HUD, never grabs keyboard/pointer -- plugin pages aren't
-        // interactive, same click-through intent as the draw overlay.
-        window.set_keyboard_interactivity(false);
-        window.set_keyboard_mode(gtk_layer_shell::KeyboardMode::None);
         let empty_region = cairo::Region::create();
         window.input_shape_combine_region(Some(&empty_region));
 
@@ -240,8 +285,9 @@ impl WebviewOverlay {
         self.visible = true;
 
         tracing::info!(
-            is_layer_window = window.is_layer_window(),
-            "html overlay: layer-shell window created"
+            is_layer_window = wayland && window.is_layer_window(),
+            wayland,
+            "html overlay: window created"
         );
 
         self.window = Some(window);
@@ -358,6 +404,12 @@ impl WebviewOverlay {
         }
         if let Some(window) = &self.window {
             tracing::info!("html overlay: show (Rocket League focused)");
+            if !is_wayland_session() {
+                // follow the game's monitor
+                let (x, y, w, h) = x11_target();
+                window.move_(x, y);
+                window.resize(w, h);
+            }
             window.show();
             self.visible = true;
         }

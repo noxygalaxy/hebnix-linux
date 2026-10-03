@@ -33,6 +33,14 @@
 //! with one `{"Ok":{...}}` / `{"Err":"..."}` line. Written from niri's IPC
 //! schema (niri-ipc), not yet tested against a live niri session.
 //!
+//! Sway speaks i3's IPC protocol over `$SWAYSOCK` (`i3ipc.rs`): the window
+//! tree gives pid, focus, geometry and workspace, and commands float and
+//! raise our own window. i3 and every other X11 window manager that speaks
+//! EWMH (Linux Mint's Cinnamon, XFCE, MATE, GNOME/KDE on X11) are queried
+//! through x11rb (`x11.rs`); i3 additionally gets floating/workspace
+//! commands over `$I3SOCK`. Written from the i3 IPC and EWMH specs and
+//! unit-tested against canned trees, not yet run against a live Sway/i3.
+//!
 //! On any other compositor we fall back to "always focused", and treat RL
 //! as covering the whole monitor (it's almost always fullscreen) so drawn
 //! overlays still show -- a warning is logged once.
@@ -42,6 +50,7 @@ use std::os::unix::net::UnixStream;
 use std::sync::{Mutex, Once};
 use std::time::{Duration, Instant};
 
+use super::{i3ipc, x11};
 use serde::Deserialize;
 use serde_json::Value;
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
@@ -51,19 +60,46 @@ enum Compositor {
     Hyprland,
     Kwin,
     Niri,
+    /// Sway: i3's IPC protocol over `$SWAYSOCK`
+    Sway,
+    /// i3: window queries over EWMH, commands over i3's IPC
+    I3,
+    /// any other X11 window manager that speaks EWMH (Cinnamon, XFCE, MATE,
+    /// GNOME/KDE on X11, ...)
+    X11,
     Other,
 }
 
 fn compositor() -> Compositor {
-    if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some() {
+    static DETECTED: std::sync::OnceLock<Compositor> = std::sync::OnceLock::new();
+    *DETECTED.get_or_init(|| {
+        detect(
+            |name| std::env::var_os(name).is_some_and(|value| !value.is_empty()),
+            &std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default(),
+        )
+    })
+}
+
+/// `is_set(name)` says whether an environment variable is set and non-empty
+fn detect(is_set: impl Fn(&str) -> bool, desktop: &str) -> Compositor {
+    let wayland = is_set("WAYLAND_DISPLAY");
+    let kde = desktop.to_uppercase().contains("KDE") || is_set("KDE_FULL_SESSION");
+    if is_set("HYPRLAND_INSTANCE_SIGNATURE") {
         Compositor::Hyprland
-    } else if std::env::var_os("NIRI_SOCKET").is_some() {
+    } else if is_set("NIRI_SOCKET") {
         Compositor::Niri
-    } else if std::env::var("XDG_CURRENT_DESKTOP")
-        .map(|d| d.to_uppercase().contains("KDE"))
-        .unwrap_or(false)
-        || std::env::var_os("KDE_FULL_SESSION").is_some()
-    {
+    } else if is_set("SWAYSOCK") {
+        Compositor::Sway
+    } else if kde && wayland {
+        Compositor::Kwin
+    } else if !wayland && is_set("DISPLAY") {
+        if is_set("I3SOCK") || desktop.to_lowercase().split(':').any(|part| part == "i3") {
+            Compositor::I3
+        } else {
+            Compositor::X11
+        }
+    } else if kde {
+        // KDE with no usable display variables: keep the old behaviour
         Compositor::Kwin
     } else {
         Compositor::Other
@@ -74,7 +110,7 @@ fn warn_unsupported_compositor_once() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         tracing::warn!(
-            "process::window: no Hyprland, KDE or niri session detected, window focus/geometry \
+            "process::window: no Hyprland, KDE, niri, Sway or X11 session detected, window focus/geometry \
              tracking is unavailable -- assuming RL is always focused and fills the monitor"
         );
     });
@@ -419,6 +455,153 @@ fn niri_rl_window_rect() -> Option<(i32, i32, i32, i32)> {
     from_layout.or_else(|| output.map(|(x, y, w, h)| (x, y, x + w, y + h)))
 }
 
+// ===================== Sway / i3 / X11 backends =====================
+
+/// a window as seen by the Sway, i3 or X11 backends
+#[derive(Clone, Debug)]
+struct GenWin {
+    pid: Option<u32>,
+    class: String,
+    title: String,
+    rect: (i32, i32, i32, i32),
+    focused: bool,
+    /// Sway/i3 workspace name
+    workspace: Option<String>,
+    /// X11 virtual desktop
+    desktop: Option<u32>,
+}
+
+/// our own window's fixed title (see main.rs's with_title)
+const OWN_TITLE: &str = "Hebnix";
+
+/// every window the backend can see. None when the window manager can't be
+/// asked at all (no IPC socket, no EWMH), which callers treat as "no window
+/// tracking" rather than "no windows".
+fn generic_windows(compositor: Compositor) -> Option<Vec<GenWin>> {
+    match compositor {
+        Compositor::Sway => {
+            let tree = i3ipc::tree()?;
+            Some(
+                i3ipc::windows_from_tree(&tree)
+                    .into_iter()
+                    .map(|w| GenWin {
+                        pid: w.pid,
+                        class: w.class,
+                        title: w.title,
+                        rect: w.rect,
+                        focused: w.focused,
+                        workspace: w.workspace,
+                        desktop: None,
+                    })
+                    .collect(),
+            )
+        }
+        Compositor::I3 | Compositor::X11 => Some(
+            x11::windows()?
+                .into_iter()
+                .map(|w| GenWin {
+                    pid: w.pid,
+                    class: w.class,
+                    title: w.title,
+                    rect: w.rect,
+                    focused: w.focused,
+                    workspace: None,
+                    desktop: w.desktop,
+                })
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
+fn generic_outputs(compositor: Compositor) -> Vec<(i32, i32, i32, i32)> {
+    match compositor {
+        Compositor::Sway => i3ipc::tree()
+            .map(|tree| i3ipc::outputs_from_tree(&tree))
+            .unwrap_or_default(),
+        Compositor::I3 | Compositor::X11 => x11::monitors(),
+        _ => Vec::new(),
+    }
+}
+
+fn is_rl_window(window: &GenWin) -> bool {
+    let class = window.class.to_lowercase();
+    let title = window.title.to_lowercase();
+    class.contains("rocketleague")
+        || class.contains("steam_app_252950")
+        || title.starts_with("rocket league (")
+}
+
+/// the RL window: by pid when known, else by class/title
+fn generic_rl_window(windows: &[GenWin], pid: Option<u32>) -> Option<&GenWin> {
+    windows
+        .iter()
+        .find(|w| pid.is_some() && w.pid == pid)
+        .or_else(|| windows.iter().find(|w| is_rl_window(w)))
+}
+
+fn generic_rl_pid(compositor: Compositor) -> Option<u32> {
+    generic_windows(compositor)?
+        .iter()
+        .find(|w| is_rl_window(w))
+        .and_then(|w| w.pid)
+}
+
+/// the output rect containing the middle of `rect`, else the first output
+fn output_for(outputs: &[(i32, i32, i32, i32)], rect: Option<(i32, i32, i32, i32)>) -> Option<(i32, i32, i32, i32)> {
+    if let Some((l, t, r, b)) = rect {
+        let (cx, cy) = ((l + r) / 2, (t + b) / 2);
+        if let Some(found) = outputs
+            .iter()
+            .find(|(ol, ot, or, ob)| cx >= *ol && cx < *or && cy >= *ot && cy < *ob)
+        {
+            return Some(*found);
+        }
+    }
+    outputs.first().copied()
+}
+
+/// sway/i3 criteria selecting our own window
+fn own_criteria(compositor: Compositor, own_pid: u32) -> String {
+    if compositor == Compositor::Sway {
+        format!("[pid={own_pid}]")
+    } else {
+        format!("[title=\"^{OWN_TITLE}$\"]")
+    }
+}
+
+fn quote_workspace(name: &str) -> String {
+    format!("\"{}\"", name.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// RL's workspace name, from the i3/Sway tree
+fn i3_rl_workspace() -> Option<String> {
+    let tree = i3ipc::tree()?;
+    i3ipc::windows_from_tree(&tree)
+        .into_iter()
+        .find(|w| {
+            let class = w.class.to_lowercase();
+            class.contains("rocketleague")
+                || class.contains("steam_app_252950")
+                || w.title.to_lowercase().starts_with("rocket league (")
+        })
+        .and_then(|w| w.workspace)
+}
+
+/// float our window (so it isn't tiled next to the game), drop its border and
+/// optionally move it to RL's workspace and focus it
+fn i3_float_own(compositor: Compositor, own_pid: u32, pop_over: bool) -> bool {
+    let sel = own_criteria(compositor, own_pid);
+    let mut ok = i3ipc::run_command(&format!("{sel} floating enable, border none"));
+    if pop_over {
+        if let Some(workspace) = i3_rl_workspace() {
+            i3ipc::run_command(&format!("{sel} move to workspace {}", quote_workspace(&workspace)));
+        }
+        ok &= i3ipc::run_command(&format!("{sel} focus"));
+    }
+    ok
+}
+
 // ===================== shared cache + dispatch =====================
 
 /// cached RL pid, the process scan / kdotool round-trip costs real time and
@@ -435,6 +618,7 @@ fn cached_rl_pid() -> Option<u32> {
         Compositor::Hyprland => hyprland_rl_pid(),
         Compositor::Kwin => kwin_rl_pid(),
         Compositor::Niri => niri_rl_pid(),
+        c @ (Compositor::Sway | Compositor::I3 | Compositor::X11) => generic_rl_pid(c),
         Compositor::Other => None,
     }
     .or_else(|| {
@@ -483,6 +667,19 @@ pub fn is_rocket_league_focused() -> bool {
             active_pid.parse::<u32>().map(|p| p == pid).unwrap_or(false)
         }
         Compositor::Niri => niri_focused_pid() == Some(pid as i64),
+        c @ (Compositor::Sway | Compositor::I3 | Compositor::X11) => {
+            match generic_windows(c) {
+                Some(windows) if !windows.is_empty() => {
+                    generic_rl_window(&windows, Some(pid)).is_some_and(|w| w.focused)
+                }
+                // the window manager can't be asked (no IPC, no EWMH): same
+                // as Other, assume focused so overlays/binds don't go dead
+                _ => {
+                    warn_unsupported_compositor_once();
+                    true
+                }
+            }
+        }
         Compositor::Other => {
             warn_unsupported_compositor_once();
             // no window tracking available: assume focused so overlays/binds
@@ -505,6 +702,8 @@ pub fn is_pid_focused(pid: u32) -> bool {
             .and_then(|active| active.parse::<u32>().ok())
             == Some(pid),
         Compositor::Niri => niri_focused_pid() == Some(pid as i64),
+        c @ (Compositor::Sway | Compositor::I3 | Compositor::X11) => generic_windows(c)
+            .is_some_and(|windows| windows.iter().any(|w| w.focused && w.pid == Some(pid))),
         Compositor::Other => false,
     }
 }
@@ -529,6 +728,11 @@ pub fn get_rocket_league_window_rect() -> Option<(i32, i32, i32, i32)> {
         }
         Compositor::Kwin => kwin_rl_window_rect(),
         Compositor::Niri => niri_rl_window_rect(),
+        c @ (Compositor::Sway | Compositor::I3 | Compositor::X11) => {
+            let windows = generic_windows(c)?;
+            let rect = generic_rl_window(&windows, Some(pid))?.rect;
+            (rect.2 > rect.0 && rect.3 > rect.1).then_some(rect)
+        }
         Compositor::Other => {
             // no geometry available: assume RL fills the monitor (it's
             // almost always fullscreen) rather than returning None, which
@@ -593,6 +797,19 @@ pub fn exempt_own_window_decorations() {
 /// map-time rule evaluation. Call once, shortly after the window is first
 /// shown. Hyprland-only, see `exempt_own_window_decorations`.
 pub fn reassert_own_window_decorations(own_pid: u32) {
+    if let c @ (Compositor::Sway | Compositor::I3) = compositor() {
+        // our window is only just mapping: keep trying until the window
+        // manager knows it, then float it so it isn't tiled next to the game
+        std::thread::spawn(move || {
+            for _ in 0..40 {
+                if i3_float_own(c, own_pid, false) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(250));
+            }
+        });
+        return;
+    }
     if !hyprland_active() {
         return;
     }
@@ -681,6 +898,24 @@ pub fn focus_own_window_over_game(own_pid: u32) -> bool {
             niri_action(serde_json::json!({ "MoveWindowToFloating": { "id": own.id } }));
             niri_action(serde_json::json!({ "FocusWindow": { "id": own.id } }))
         }
+        // Sway/i3: float our window (it is tiled by default), move it to
+        // RL's workspace and focus it. Sway shows a fullscreen window alone
+        // on its workspace, so run RL borderless windowed rather than
+        // fullscreen if the pop-over doesn't appear over it.
+        c @ (Compositor::Sway | Compositor::I3) => i3_float_own(c, own_pid, true),
+        Compositor::X11 => {
+            let Some(own) = x11::own_window(own_pid, OWN_TITLE) else {
+                return false;
+            };
+            let rl_desktop = generic_windows(Compositor::X11).and_then(|windows| {
+                generic_rl_window(&windows, cached_rl_pid()).and_then(|w| w.desktop)
+            });
+            if let Some(desktop) = rl_desktop {
+                x11::move_to_desktop(own, desktop);
+            }
+            x11::set_above(own, true);
+            x11::activate(own)
+        }
         Compositor::Other => {
             warn_unsupported_compositor_once();
             false
@@ -700,8 +935,13 @@ pub fn unminimize_own_window() -> bool {
             kdotool_lines(&["search", "--name", "^Hebnix$", "windowactivate", "windowraise"])
                 .is_some()
         }
-        // no minimize on Hyprland or niri
-        Compositor::Hyprland | Compositor::Niri | Compositor::Other => false,
+        Compositor::I3 | Compositor::X11 => match x11::own_window(std::process::id(), OWN_TITLE) {
+            Some(own) if x11::is_hidden(own) => x11::activate(own),
+            _ => false,
+        },
+        // no minimize on Hyprland, niri or Sway (i3 and Sway park windows on
+        // the scratchpad instead, which Hebnix doesn't use)
+        Compositor::Hyprland | Compositor::Niri | Compositor::Sway | Compositor::Other => false,
     }
 }
 
@@ -777,9 +1017,71 @@ pub fn rocket_league_monitor_size() -> (i32, i32) {
                 return (w, h);
             }
         }
+        c @ (Compositor::Sway | Compositor::I3 | Compositor::X11) => {
+            if let Some((l, t, r, b)) = rocket_league_monitor_rect_for(c) {
+                return (r - l, b - t);
+            }
+        }
         Compositor::Other => warn_unsupported_compositor_once(),
     }
     (1920, 1080)
+}
+
+fn rocket_league_monitor_rect_for(compositor: Compositor) -> Option<(i32, i32, i32, i32)> {
+    let rl_rect = generic_windows(compositor).and_then(|windows| {
+        generic_rl_window(&windows, cached_rl_pid()).map(|w| w.rect)
+    });
+    output_for(&generic_outputs(compositor), rl_rect)
+}
+
+/// (left, top, right, bottom) of the monitor RL is on, in desktop
+/// coordinates. Only known on the Sway, i3 and X11 backends; the Wayland
+/// overlays (layer-shell) are placed by the compositor instead.
+pub fn rocket_league_monitor_rect() -> Option<(i32, i32, i32, i32)> {
+    match compositor() {
+        c @ (Compositor::Sway | Compositor::I3 | Compositor::X11) => {
+            rocket_league_monitor_rect_for(c)
+        }
+        _ => None,
+    }
+}
+
+/// true when our own window's focus can be asked of the window manager
+/// (Sway, i3, X11), which is when `is_pid_focused(own pid)` is trustworthy
+pub fn can_track_own_window() -> bool {
+    matches!(compositor(), Compositor::Sway | Compositor::I3 | Compositor::X11)
+}
+
+/// keep our own window above the game (Hyprland and KWin handle this
+/// elsewhere). X11: `_NET_WM_STATE_ABOVE`. Sway/i3: floating windows are
+/// drawn above tiled ones.
+pub fn set_own_always_on_top(own_pid: u32, on_top: bool) -> bool {
+    match compositor() {
+        c @ (Compositor::Sway | Compositor::I3) => {
+            on_top && i3ipc::run_command(&format!("{} floating enable", own_criteria(c, own_pid)))
+        }
+        Compositor::X11 => x11::own_window(own_pid, OWN_TITLE)
+            .is_some_and(|window| x11::set_above(window, on_top)),
+        _ => false,
+    }
+}
+
+/// a second Hebnix was started: bring the running one forward
+pub fn raise_other_instance(own_pid: u32) -> bool {
+    match compositor() {
+        c @ (Compositor::Sway | Compositor::I3) => {
+            i3ipc::run_command(&format!("[title=\"^{OWN_TITLE}$\"] focus"))
+                || i3ipc::run_command(&format!("{} focus", own_criteria(c, own_pid)))
+        }
+        Compositor::X11 => x11::windows()
+            .and_then(|windows| {
+                windows
+                    .into_iter()
+                    .find(|w| w.title == OWN_TITLE && w.pid != Some(own_pid))
+            })
+            .is_some_and(|w| x11::activate(w.id)),
+        _ => false,
+    }
 }
 
 /// is the cursor inside the RL window.
@@ -814,8 +1116,12 @@ pub fn is_cursor_inside_rl_window() -> bool {
                 _ => return false,
             }
         }
-        // no cursor position over niri's IPC
-        Compositor::Niri | Compositor::Other => return false,
+        Compositor::I3 | Compositor::X11 => match x11::pointer() {
+            Some(position) => position,
+            None => return false,
+        },
+        // no cursor position over niri's or Sway's IPC
+        Compositor::Niri | Compositor::Sway | Compositor::Other => return false,
     };
     left <= x && x <= right && top <= y && y <= bottom
 }
@@ -823,6 +1129,64 @@ pub fn is_cursor_inside_rl_window() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn detect_with(vars: &[&str], desktop: &str) -> Compositor {
+        detect(|name| vars.contains(&name), desktop)
+    }
+
+    #[test]
+    fn picks_the_backend_from_the_session_environment() {
+        use Compositor::*;
+        assert!(detect_with(&["HYPRLAND_INSTANCE_SIGNATURE", "WAYLAND_DISPLAY"], "Hyprland") == Hyprland);
+        assert!(detect_with(&["NIRI_SOCKET", "WAYLAND_DISPLAY"], "niri") == Niri);
+        assert!(detect_with(&["SWAYSOCK", "WAYLAND_DISPLAY", "DISPLAY"], "sway") == Sway);
+        assert!(detect_with(&["WAYLAND_DISPLAY"], "KDE") == Kwin);
+        assert!(detect_with(&["DISPLAY"], "KDE") == X11);
+        assert!(detect_with(&["DISPLAY", "I3SOCK"], "") == I3);
+        assert!(detect_with(&["DISPLAY"], "i3") == I3);
+        assert!(detect_with(&["DISPLAY"], "X-Cinnamon") == X11);
+        assert!(detect_with(&["DISPLAY"], "XFCE") == X11);
+        assert!(detect_with(&["WAYLAND_DISPLAY"], "GNOME") == Other);
+        assert!(detect_with(&[], "") == Other);
+    }
+
+    fn win(pid: Option<u32>, class: &str, title: &str, focused: bool) -> GenWin {
+        GenWin {
+            pid,
+            class: class.into(),
+            title: title.into(),
+            rect: (0, 0, 10, 10),
+            focused,
+            workspace: None,
+            desktop: None,
+        }
+    }
+
+    #[test]
+    fn recognises_the_rocket_league_window() {
+        let windows = vec![
+            win(Some(1), "firefox", "Rocket League - YouTube", false),
+            win(Some(2), "steam_app_252950", "Rocket League (64-bit, DX11, Cooked)", true),
+        ];
+        assert_eq!(generic_rl_window(&windows, None).and_then(|w| w.pid), Some(2));
+        // the pid wins when it is known
+        assert_eq!(generic_rl_window(&windows, Some(1)).and_then(|w| w.pid), Some(1));
+        assert!(!is_rl_window(&windows[0]));
+    }
+
+    #[test]
+    fn picks_the_output_the_game_is_on() {
+        let outputs = [(0, 0, 1920, 1080), (1920, 0, 3840, 1080)];
+        assert_eq!(output_for(&outputs, Some((2000, 100, 3000, 900))), Some(outputs[1]));
+        assert_eq!(output_for(&outputs, None), Some(outputs[0]));
+        assert_eq!(output_for(&[], None), None);
+    }
+
+    #[test]
+    fn quotes_workspace_names_for_i3_commands() {
+        assert_eq!(quote_workspace("1"), "\"1\"");
+        assert_eq!(quote_workspace("a\"b"), "\"a\\\"b\"");
+    }
 
     #[test]
     fn parses_a_niri_window_with_and_without_layout() {

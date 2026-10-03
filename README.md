@@ -1,9 +1,10 @@
 # Hebnix (Linux)
 
 This is a Linux port of [Hebnix](https://hebnix.com), targeting **Hyprland**
-(or another wlroots-based Wayland compositor with `wlr-layer-shell` support).
-KDE Plasma/KWin has a best-effort backend for window focus/geometry but has
-not been tested against a real Plasma session — see [Known limitations](#known-limitations).
+(or another wlroots-based Wayland compositor with `wlr-layer-shell` support, such as Sway).
+There are also backends for niri, i3 and EWMH X11 desktops (Linux Mint's Cinnamon, XFCE, MATE), and a
+best-effort one for KDE Plasma/KWin. Several of those have not been tested against a real session —
+see [Known limitations](#known-limitations).
 
 ## Installing
 
@@ -178,5 +179,10 @@ everything will work bro.
 As long as it works with evdev it will work.
 
 ## Known limitations
-- On KDE Plasma, you'll need `kdotool` for some things to work.
-- idk much about other DEs/WMs icl but the main problem you will have there (if any) will just be problems with the window not coming to the front or the window not disappearing properly when you press f2 however rest should work as long as you have gtk3 and wayland
+- On KDE Plasma (Wayland), you'll need `kdotool` for some things to work.
+- Window/overlay support by desktop (Sway, i3 and X11 are new and untested on real sessions, reports welcome):
+  - **Hyprland, niri, Sway**: full support, overlay via `wlr-layer-shell`. On Sway run Rocket League borderless windowed, not Sway-fullscreen, or the overlay and the F2 pop-over can't show over it.
+  - **KDE Plasma (Wayland)**: focus tracking via `kdotool`; the overlay needs KWin's layer-shell support.
+  - **i3, Linux Mint (Cinnamon), XFCE, MATE, GNOME/KDE on X11**: focus, always-on-top and the overlays use an X11 backend. The overlays need a compositing manager: Cinnamon/Muffin and XFCE have one built in (turn compositing on), on i3 install `picom`. Run Rocket League borderless windowed so the overlay isn't covered. On i3 the tray icon needs a bar with a tray (e.g. i3bar `tray_output`, or `snixembed` for StatusNotifier icons).
+  - **GNOME on Wayland**: no layer-shell, so no overlay.
+- Other desktops: the main problem you will have (if any) is the window not coming to the front or not disappearing properly when you press f2; the rest should work as long as you have gtk3 and either Wayland or X11.

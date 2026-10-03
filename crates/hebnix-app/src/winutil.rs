@@ -60,6 +60,9 @@ pub fn acquire_single_instance() -> Option<SingleInstanceLock> {
 /// client-side way to raise another process's window on Wayland, so this
 /// just logs -- the user has to alt-tab/click the taskbar entry themselves.
 pub fn focus_existing_instance() {
+    if hebnix_sdk::process::raise_other_instance(std::process::id()) {
+        return;
+    }
     tracing::info!("hebnix is already running (another instance holds the single-instance lock)");
 }
 
@@ -81,7 +84,13 @@ pub fn parent_file_dialog(dialog: rfd::FileDialog) -> rfd::FileDialog {
     dialog
 }
 
-pub fn set_main_window_topmost(_topmost: bool) {}
+/// X11 / Sway / i3 only (`_NET_WM_STATE_ABOVE`, floating); elsewhere the
+/// compositor decides stacking and this stays a no-op
+pub fn set_main_window_topmost(topmost: bool) {
+    if hebnix_sdk::process::can_track_own_window() {
+        hebnix_sdk::process::set_own_always_on_top(std::process::id(), topmost);
+    }
+}
 
 pub fn install_minimize_hook(_hwnd: WindowHandle, _ctx: &eframe::egui::Context) {}
 
@@ -90,10 +99,13 @@ pub fn install_minimize_hook(_hwnd: WindowHandle, _ctx: &eframe::egui::Context) 
 static MAIN_HIDDEN: AtomicBool = AtomicBool::new(false);
 static CAME_FROM_GAME: AtomicBool = AtomicBool::new(false);
 
-/// best-effort: on Hyprland we can ask via IPC whether we're the active
-/// window; elsewhere (no reliable signal) assume not.
+/// best-effort: on X11, Sway and i3 we ask the window manager whether we're
+/// the active window; elsewhere (no reliable signal) assume not.
 pub fn foreground_window_is_ours() -> bool {
-    false
+    // only where the window manager can say so cheaply; Hyprland/KDE/niri
+    // keep the old constant false, their callers rely on it
+    hebnix_sdk::process::can_track_own_window()
+        && hebnix_sdk::process::window::is_pid_focused(std::process::id())
 }
 
 /// is Hebnix's own window the focused one, asked of the compositor.

@@ -19,6 +19,7 @@ pkgbase = hebnix-linux
 	depends = libxkbcommon
 	depends = libayatana-appindicator
 	optdepends = kdotool: window focus tracking on KDE/Plasma (AUR)
+	optdepends = picom: compositing manager for the in-game overlay on i3 and other X11 window managers without one
 	optdepends = kscreen: kscreen-doctor, used for monitor info on KDE/Plasma
 	optdepends = tailscale: Workshop LAN multiplayer (Hebnix runs its own separate tailscaled)
 	optdepends = dotnet-runtime: downloading Steam Workshop maps in the Import Map tab
