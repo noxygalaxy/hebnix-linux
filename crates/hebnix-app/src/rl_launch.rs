@@ -334,6 +334,17 @@ pub fn restart(cfg: &RlLaunchCfg) -> Result<(), String> {
     }
 }
 
+/// Workshop multiplayer without `-multihome`: same start path as a
+/// multihome launch (so a Heroic game goes straight to Heroic, which is
+/// pre-started and waited on), just without the argument.
+pub fn restart_for_multiplayer_without_multihome(cfg: &RlLaunchCfg) -> Result<(), String> {
+    tracing::info!("rl_launch: restart without -multihome, mode={:?}", cfg.mode);
+    match cfg.mode {
+        RlLaunchMode::SteamShortcutToHeroic | RlLaunchMode::HeroicDirect => heroic_launch(cfg, None),
+        _ => restart(cfg),
+    }
+}
+
 /// Workshop LAN "restart with -multihome=<address>".
 /// `HEBNIX_RL_MULTIHOME_COMMAND_TEMPLATE` (with `{multihome}` /
 /// `{multihome_encoded}` placeholders, shell-word-split) overrides

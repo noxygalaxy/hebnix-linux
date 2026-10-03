@@ -762,6 +762,10 @@ struct MultiplayerState {
     /// route everything through tailscale's relays so other players never
     /// see this machine's public address (saved in multiplayer_settings.json)
     relay_only: bool,
+    /// Start Rocket League without `-multihome`, so its online play is left
+    /// alone (saved in multiplayer_settings.json). Experimental: LAN play
+    /// then relies on the game listening on every address.
+    skip_multihome: bool,
     /// Pre-create vanilla files in otherwise empty Workshop map slots before
     /// launching Rocket League. This is only needed when a peer might send a
     /// map for a slot that is not already present in mods.
@@ -823,6 +827,7 @@ impl Default for MultiplayerState {
             player_filter: String::new(),
             abandon_tailnet: false,
             relay_only: false,
+            skip_multihome: false,
             seed_other_map_slots: false,
             sidecar: None,
             tailnet_requested: false,
@@ -875,6 +880,11 @@ impl WorkshopState {
             .ok()
             .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
             .and_then(|settings| settings.get("relay_only").and_then(Value::as_bool))
+            .unwrap_or(false);
+        multiplayer.skip_multihome = std::fs::read(manager.runtime_dir.join(MULTIPLAYER_SETTINGS_FILE))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .and_then(|settings| settings.get("skip_multihome").and_then(Value::as_bool))
             .unwrap_or(false);
         Self {
             manager,
@@ -1296,6 +1306,21 @@ impl WorkshopState {
                 {
                     self.save_multiplayer_settings();
                 }
+                if ui
+                    .checkbox(
+                        &mut self.multiplayer.skip_multihome,
+                        "Don't use -multihome (experimental)",
+                    )
+                    .on_hover_text(
+                        "Starts Rocket League without pinning its network to the Workshop \
+                         address, so normal online matches keep working while you're \
+                         connected. LAN matches may not work this way; turn it off if they \
+                         don't.",
+                    )
+                    .changed()
+                {
+                    self.save_multiplayer_settings();
+                }
                 ui.add_space(12.0);
                 if ui
                     .add_sized([160.0, 38.0], egui::Button::new(t("multiplayer-connect")))
@@ -1701,6 +1726,7 @@ impl WorkshopState {
         let rl_path = rl_path.to_string();
         let rl_launch = self.rl_launch.clone();
         let seed_other_map_slots = self.multiplayer.seed_other_map_slots;
+        let skip_multihome = self.multiplayer.skip_multihome;
         let manager = self.manager.clone();
         let tx = tx.clone();
         let repaint = ctx.clone();
@@ -1708,11 +1734,15 @@ impl WorkshopState {
             if seed_other_map_slots {
                 manager.seed_empty_slots(&rl_path);
             }
-            let result = crate::winutil::restart_rocket_league_multihome(
-                Path::new(&rl_path),
-                &tailnet_ip,
-                &rl_launch,
-            );
+            let result = if skip_multihome {
+                crate::winutil::restart_rocket_league_without_multihome(Path::new(&rl_path), &rl_launch)
+            } else {
+                crate::winutil::restart_rocket_league_multihome(
+                    Path::new(&rl_path),
+                    &tailnet_ip,
+                    &rl_launch,
+                )
+            };
             let _ = tx.send(AppMsg::WorkshopMultiplayerLaunched { result });
             repaint.request_repaint();
         });
@@ -1963,7 +1993,10 @@ impl WorkshopState {
     }
 
     fn save_multiplayer_settings(&self) {
-        let settings = serde_json::json!({ "relay_only": self.multiplayer.relay_only });
+        let settings = serde_json::json!({
+            "relay_only": self.multiplayer.relay_only,
+            "skip_multihome": self.multiplayer.skip_multihome,
+        });
         let _ = std::fs::write(
             self.manager.runtime_dir.join(MULTIPLAYER_SETTINGS_FILE),
             settings.to_string(),
@@ -2067,6 +2100,7 @@ impl WorkshopState {
             return;
         };
         self.multiplayer.multihome_check_in_flight = true;
+        let skip_multihome = self.multiplayer.skip_multihome;
         let tx = tx.clone();
         let repaint = ctx.clone();
         std::thread::spawn(move || {
@@ -2075,7 +2109,8 @@ impl WorkshopState {
                 std::thread::sleep(MULTIHOME_CHECK_INTERVAL);
             }
             let rl_open = hebnix_sdk::process::is_rocket_league_running();
-            let launch_ready = rl_open && rocket_league_launched_with_multihome(&tailnet_ip);
+            let launch_ready = rl_open
+                && (skip_multihome || rocket_league_launched_with_multihome(&tailnet_ip));
             let _ = tx.send(AppMsg::WorkshopLaunchCheck {
                 rl_open,
                 launch_ready,
