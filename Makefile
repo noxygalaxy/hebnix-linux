@@ -5,7 +5,7 @@
 # build recipe -- `make release` is the one build path; `make install`
 # (with PREFIX/DESTDIR overridden as needed) is the one install path.
 
-.PHONY: all build release debug clean install uninstall run test check fmt clippy help
+.PHONY: all build release debug clean install uninstall run test check fmt clippy moon-bundle help
 
 # Default target
 all: release
@@ -88,6 +88,11 @@ dev: debug
 	@echo "Running debug version..."
 	./target/debug/hebnix-app
 
+# Package the built release as a single .moon bundle ( packaging/moon ).
+moon-bundle: release
+	@echo "Building .moon bundle..."
+	bash packaging/moon/build-moon-bundle.sh --binary target/release/$(CARGO_BIN)
+
 # Show help
 help:
 	@echo "Hebnix Linux - Available targets:"
@@ -105,4 +110,5 @@ help:
 	@echo "  make check        - Check code without building"
 	@echo "  make fmt          - Format code with rustfmt"
 	@echo "  make clippy       - Run clippy linter"
+	@echo "  make moon-bundle  - Package the release as one .moon bundle"
 	@echo "  make help         - Show this help message"

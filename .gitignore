@@ -4,6 +4,9 @@
 __pycache__/
 *.pyc
 
+# packaging output: .moon bundles and anything else a packaging script writes
+/dist
+
 # req.hebnix.com TOTP secret - never commit
 req_key.txt
 

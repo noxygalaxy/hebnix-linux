@@ -5,6 +5,7 @@ name: Release
 #   - a plain Ubuntu/glibc-generic tarball (binary + desktop file + icon)
 #   - a distro-agnostic AppImage for direct download / hebnix.com
 #   - a separate Arch-built tarball, specifically for hebnix-linux-bin
+#   - a .moon bundle for each of the two tarballs ( packaging/moon )
 #
 # Why two tarballs: a dynamically-linked binary isn't actually
 # distro-agnostic -- it needs the *build* host's shared library ABI to
@@ -16,6 +17,11 @@ name: Release
 # container so hebnix-linux-bin gets a binary linked against the same
 # library versions Arch itself ships. The AppImage doesn't have this
 # problem since it bundles its own libraries.
+#
+# The .moon bundles follow the same split: hebnix-<version>-linux-x86_64.moon
+# for glibc hosts, hebnix-<version>-linux-x86_64-arch.moon for Arch. Each is
+# packed from the tarball built in the same job, so a bundle always contains
+# exactly the binary shipped next to it.
 #
 # Nightly/bleeding-edge builds are a separate workflow (nightly.yml) and are
 # never published as a stable tagged release.
@@ -101,10 +107,23 @@ jobs:
             --update-info "gh-releases-zsync|${{ github.repository_owner }}|hebnix-linux|latest|Hebnix-*x86_64.AppImage.zsync"
           echo "path=$APP_NAME" >> "$GITHUB_OUTPUT"
 
+      # A .moon bundle: the whole app in one tar.gz ( binary + desktop file + icon ), installable with `moon install`.
+      - name: Package .moon bundle
+        id: moonbundle
+        run: |
+          set -euo pipefail
+          NAME="hebnix-${{ steps.version.outputs.version }}-linux-x86_64.moon"
+          bash packaging/moon/build-moon-bundle.sh \
+            --from "${{ steps.tarball.outputs.path }}" \
+            --version "${{ steps.version.outputs.version }}" \
+            --output "$NAME"
+          echo "path=$NAME" >> "$GITHUB_OUTPUT"
+
       - name: Checksums
         run: |
           sha256sum "${{ steps.tarball.outputs.path }}" \
-            "${{ steps.appimage.outputs.path }}" > SHA256SUMS.txt
+            "${{ steps.appimage.outputs.path }}" \
+            "${{ steps.moonbundle.outputs.path }}" > SHA256SUMS.txt
           if [ -f "${{ steps.appimage.outputs.path }}.zsync" ]; then
             sha256sum "${{ steps.appimage.outputs.path }}.zsync" >> SHA256SUMS.txt
           fi
@@ -120,6 +139,7 @@ jobs:
             ${{ steps.tarball.outputs.path }}
             ${{ steps.appimage.outputs.path }}
             ${{ steps.appimage.outputs.path }}.zsync
+            ${{ steps.moonbundle.outputs.path }}
             SHA256SUMS.txt
           fail_on_unmatched_files: false
 
@@ -176,8 +196,22 @@ jobs:
           install -Dm644 packaging/modules-load.d/hebnix-uinput.conf \
             "$STAGE/lib/modules-load.d/hebnix-uinput.conf"
           tar -C "$(dirname "$STAGE")" -czf "$NAME.tar.gz" "$NAME"
-          sha256sum "$NAME.tar.gz" > SHA256SUMS-arch.txt
-          echo "path=$NAME.tar.gz" >> "$GITHUB_OUTPUT"
+
+      - name: Package .moon bundle (arch)
+        id: moonbundle
+        run: |
+          set -euo pipefail
+          NAME="hebnix-${{ steps.version.outputs.version }}-linux-x86_64-arch.moon"
+          bash packaging/moon/build-moon-bundle.sh \
+            --from "${{ steps.tarball.outputs.path }}" \
+            --version "${{ steps.version.outputs.version }}" \
+            --output "$NAME"
+          echo "path=$NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Checksums
+        run: |
+          sha256sum "${{ steps.tarball.outputs.path }}" \
+            "${{ steps.moonbundle.outputs.path }}" > SHA256SUMS-arch.txt
 
       - name: Upload to GitHub release
         uses: softprops/action-gh-release@v2
@@ -185,5 +219,6 @@ jobs:
           tag_name: ${{ steps.version.outputs.tag }}
           files: |
             ${{ steps.tarball.outputs.path }}
+            ${{ steps.moonbundle.outputs.path }}
             SHA256SUMS-arch.txt
           fail_on_unmatched_files: false
